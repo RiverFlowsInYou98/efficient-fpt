@@ -175,4 +175,6 @@ cython_debug/
 
 
 # custom ignore
-examples/*.png
+examples/**/*.png
+
+examples/example4/bootstrap_estimates.npy
