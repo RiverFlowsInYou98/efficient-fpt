@@ -1,0 +1,13 @@
+# Include top-level metadata and config files
+include LICENSE
+include README.md
+include pyproject.toml
+include setup.py
+
+# Include all Python files in the source tree
+recursive-include src/efficient_fpt *.py
+
+# Include all Cython files
+recursive-include src/efficient_fpt *.pyx
+recursive-include src/efficient_fpt *.pxd
+

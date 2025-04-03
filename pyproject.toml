@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "cython", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "efficient-fpt"
+version = "0.1.0"
+description = "Codes for efficient inference in first passage time models"
+authors = [
+    { name = "Sicheng Liu", email = "sicheng_liu@brown.edu" }
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.7"
+dependencies = [
+    "numpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/RiverFlowsInYou98/efficient-fpt"
+Repository = "https://github.com/RiverFlowsInYou98/efficient-fpt"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+

@@ -40,7 +40,6 @@ setup(
             "boundscheck": False,
             "wraparound": False,
             "cdivision": True,
-        }
+        },
     ),
 )
-
