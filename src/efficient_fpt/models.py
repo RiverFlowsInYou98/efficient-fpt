@@ -146,6 +146,46 @@ class DDModel(ABC):
         nonexit_x = X[np.isnan(fp_times)]
         return fp_times[~np.isnan(fp_times)], nonexit_x
 
+    # def simulate_fpt_data(self, dt: float = 1e-3, num: int = 1000):
+    #     """
+    #     Vectorized simulation of *num* first passage times (FPTs).
+    #     """
+    #     t = 0.0
+    #     X = self.initialize_X0(t, num)
+    #     active_idx = np.arange(num)
+
+    #     result = np.empty((num, 2))
+    #     result[:] = np.nan  # initialize time column with NaN
+    #     result[:, 1] = 0  # 0 = no exit yet
+
+    #     while active_idx.size:
+    #         print(active_idx.size)
+    #         dW = np.random.normal(scale=np.sqrt(dt), size=active_idx.size)
+
+    #         X_prev = X[active_idx]
+    #         drift = self.drift_coeff(X_prev, t)
+    #         diffusion = self.diffusion_coeff(X_prev, t)
+
+    #         X_new = X_prev + drift * dt + diffusion * dW
+
+    #         upper_bound = self.upper_bdy(t + dt)
+    #         lower_bound = self.lower_bdy(t + dt)
+
+    #         hit_u = X_new >= upper_bound
+    #         hit_l = X_new <= lower_bound
+    #         hits = hit_u | hit_l
+
+    #         if np.any(hits):
+    #             exit_time = t + 0.5 * dt
+    #             exited = active_idx[hits]
+    #             result[exited, 0] = exit_time
+    #             result[exited, 1] = np.where(hit_u[hits], 1, -1)
+
+    #         X[active_idx] = X_new
+    #         active_idx = active_idx[~hits]
+    #         t += dt
+    #     return result
+
     def simulate_fpt_datum(self, dt=0.001):
         """
         Simulate one instance of the first passage time (FPT) for a given drift-diffusion model.
@@ -254,7 +294,6 @@ class MultiStageModel(DDModel):
 
     def lower_bdy(self, t):
         return piecewise_linear_func(t, self.lb_array, self.b2_array, self.sacc_array)
-
 
 
 def piecewise_const_func(t, mu_array, sacc_array):

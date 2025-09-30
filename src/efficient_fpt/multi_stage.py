@@ -130,7 +130,7 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
         xs = x0[1]
         qs = np.ones_like(ws)
     elif callable(x0):
-        xs, ws = lgwtLookupTable(20, lb, ub)
+        xs, ws = lgwtLookupTable(30, lb, ub)
         qs = x0(xs)
     xs_prev, ws_prev, qs_prev, ub_prev, lb_prev = xs, ws, qs, ub, lb
     _sacc_array = np.concatenate([sacc_array, [T]])
@@ -142,7 +142,7 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
         ub += b1_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
         lb += b2_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
         if n < d - 2:
-            xs, ws = lgwtLookupTable(20, lb, ub)
+            xs, ws = lgwtLookupTable(30, lb, ub)
         elif n == d - 2:
             xs, ws = lgwtLookupTable(30, lb, ub)
         else:  # n == d - 1

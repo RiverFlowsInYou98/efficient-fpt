@@ -33,5 +33,10 @@ def test_multi_stage_fptd():
         
     result_np = get_multistage_densities(rt_array, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, T, np.array([[1], [x0]]))
     result_np = result_np[0][1]
+    
+    print(-np.log(result_np))
+    print(-np.log(result_cy))
 
     assert np.allclose(result_cy, result_np, atol=1e-10)
+    
+test_multi_stage_fptd()
