@@ -1162,21 +1162,23 @@ cpdef double compute_glamloss_parallel(np.ndarray[double, ndim=1] mu1_data, \
                                        np.ndarray[int, ndim=1] length_data, \
                                        int max_d, double sigma, double a, double b, double x0, double threshold=1e-20):
     cdef:
-        int n
-        double total_loss = 0.0, likelihood, loss
+        int n, i, L
+        double total_loss = 0.0, likelihood, loss, mu_sum
         int num_data = len(rt_data), num_data_effective = len(rt_data)
         np.ndarray[double, ndim=2] mu_data=get_mu_array_data_padded(mu1_data, mu2_data, max_d, flag_data, length_data)
         double[:, :] mu_data_view = mu_data
         double[:, :] sacc_data_view = sacc_data
-        double[:] approx_mu_data = np.zeros(num_data)
+        double[:] mu_glam_data = np.zeros(num_data)
     for n in range(num_data):
-        approx_mu_data[n] = mu_data[n, 0] * sacc_data[n, 0] + mu_data[n, length_data[n] - 1] * (rt_data[n] - sacc_data[n, length_data[n] - 2])
-        for i in range(1, length_data[n] - 1):
-            approx_mu_data[n] += mu_data[n, i] * (sacc_data[n, i] - sacc_data[n, i - 1])
-        approx_mu_data[n] /= rt_data[n]
+        L = length_data[n] # effective length for this trial
+        mu_sum = 0.0
+        for i in range(L - 1):
+            mu_sum += mu_data_view[n, i] * (sacc_data_view[n, i + 1] - sacc_data_view[n, i])
+        mu_sum += mu_data_view[n, L - 1] * (rt_data[n] - sacc_data_view[n, L - 1])
+        mu_glam_data[n] = mu_sum / rt_data[n]
     max_num_threads = omp_get_max_threads()
     for n in prange(num_data, nogil=True, schedule='dynamic', num_threads=max_num_threads):
-        likelihood = fptd_single_cy(rt_data[n], approx_mu_data[n], sigma, a, -b, -a, b, x0, choice_data[n], 100, threshold)
+        likelihood = fptd_single_cy(rt_data[n], mu_glam_data[n], sigma, a, -b, -a, b, x0, choice_data[n], 100, threshold)
         if likelihood > 0:
             loss = -log(likelihood)
         else:

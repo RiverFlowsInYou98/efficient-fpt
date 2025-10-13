@@ -105,87 +105,6 @@ class DDModel(ABC):
 
         return t_grid, X_grids
 
-    def simulate_fptd_tillT(self, T, dt=0.001, num=1000):
-        """
-        Simulates first passage times (FPT) for multiple sample paths **in parallel**.
-        Vectorized to speed up the simulation.
-        Returns:
-        - `fp_times`: Array of first passage times (both upper and lower boundaries)
-        - `nonexit_x`: Array of final values for trajectories that did not exit by time T
-        """
-        t = 0.0
-        X = self.initialize_X0(t, num)
-        active_idx = np.arange(num)
-        fp_times = np.full(num, np.nan)
-
-        while t < T and active_idx.size > 0:
-            dt_curr = min(dt, T - t)
-            X_prev = X[active_idx]
-            dW = np.random.normal(loc=0.0, scale=np.sqrt(dt_curr), size=active_idx.size)
-            drift = self.drift_coeff(X_prev, t)
-            diffusion = self.diffusion_coeff(X_prev, t)
-            X_new = X_prev + drift * dt_curr + diffusion * dW
-
-            upper_bound = self.upper_bdy(t + dt_curr)
-            lower_bound = self.lower_bdy(t + dt_curr)
-            hit_upper = X_new >= upper_bound
-            hit_lower = X_new <= lower_bound
-
-            if np.any(hit_upper):
-                crossing_time = t + 0.5 * dt_curr
-                fp_times[active_idx[hit_upper]] = crossing_time
-
-            if np.any(hit_lower):
-                crossing_time = t + 0.5 * dt_curr
-                fp_times[active_idx[hit_lower]] = -crossing_time
-
-            X[active_idx] = X_new
-            active_idx = active_idx[~(hit_upper | hit_lower)]
-            t += dt_curr
-
-        nonexit_x = X[np.isnan(fp_times)]
-        return fp_times[~np.isnan(fp_times)], nonexit_x
-
-    # def simulate_fpt_data(self, dt: float = 1e-3, num: int = 1000):
-    #     """
-    #     Vectorized simulation of *num* first passage times (FPTs).
-    #     """
-    #     t = 0.0
-    #     X = self.initialize_X0(t, num)
-    #     active_idx = np.arange(num)
-
-    #     result = np.empty((num, 2))
-    #     result[:] = np.nan  # initialize time column with NaN
-    #     result[:, 1] = 0  # 0 = no exit yet
-
-    #     while active_idx.size:
-    #         print(active_idx.size)
-    #         dW = np.random.normal(scale=np.sqrt(dt), size=active_idx.size)
-
-    #         X_prev = X[active_idx]
-    #         drift = self.drift_coeff(X_prev, t)
-    #         diffusion = self.diffusion_coeff(X_prev, t)
-
-    #         X_new = X_prev + drift * dt + diffusion * dW
-
-    #         upper_bound = self.upper_bdy(t + dt)
-    #         lower_bound = self.lower_bdy(t + dt)
-
-    #         hit_u = X_new >= upper_bound
-    #         hit_l = X_new <= lower_bound
-    #         hits = hit_u | hit_l
-
-    #         if np.any(hits):
-    #             exit_time = t + 0.5 * dt
-    #             exited = active_idx[hits]
-    #             result[exited, 0] = exit_time
-    #             result[exited, 1] = np.where(hit_u[hits], 1, -1)
-
-    #         X[active_idx] = X_new
-    #         active_idx = active_idx[~hits]
-    #         t += dt
-    #     return result
-
     def simulate_fpt_datum(self, dt=0.001):
         """
         Simulate one instance of the first passage time (FPT) for a given drift-diffusion model.
@@ -210,6 +129,114 @@ class DDModel(ABC):
                 return t_fpt, -1
             X = X_new
             t += dt
+
+    def simulate_fptd_tillT(self, T: float, dt: float = 0.001, num: int = 1000):
+        """
+        Simulates first passage times (FPT) for multiple sample paths **in parallel**.
+        Vectorized to speed up the simulation.
+        Automatically halts when the simulation time exceeds T.
+
+        Returns
+        -------
+        fp_times : np.ndarray
+            Array of first passage times (positive = upper boundary, negative = lower boundary)
+        nonexit_x : np.ndarray
+            Final values for trajectories that did not exit by time T
+        """
+        t = 0.0
+        X = self.initialize_X0(t, num)
+        active_idx = np.arange(num)
+        fp_times = np.full(num, np.nan)
+
+        steps = 0
+        while t < T and active_idx.size > 0:
+            if steps % 10000 == 0:
+                print(f"Time step {steps}: {active_idx.size} paths active at t={t:.6f}.")
+            # Cap final step to not exceed T
+            dt_curr = min(dt, T - t)
+
+            # Euler–Maruyama update
+            X_prev = X[active_idx]
+            dW = np.random.normal(loc=0.0, scale=np.sqrt(dt_curr), size=active_idx.size)
+            drift = self.drift_coeff(X_prev, t)
+            diffusion = self.diffusion_coeff(X_prev, t)
+            X_new = X_prev + drift * dt_curr + diffusion * dW
+
+            # Boundary checks
+            upper_bound = self.upper_bdy(t + dt_curr)
+            lower_bound = self.lower_bdy(t + dt_curr)
+            hit_upper = X_new >= upper_bound
+            hit_lower = X_new <= lower_bound
+
+            if np.any(hit_upper):
+                crossing_time = t + 0.5 * dt_curr
+                fp_times[active_idx[hit_upper]] = crossing_time
+            if np.any(hit_lower):
+                crossing_time = t + 0.5 * dt_curr
+                fp_times[active_idx[hit_lower]] = -crossing_time
+
+            # Update active indices
+            X[active_idx] = X_new
+            active_idx = active_idx[~(hit_upper | hit_lower)]
+
+            t += dt_curr
+            steps += 1
+
+        # Remaining trajectories are censored at T
+        nonexit_x = X[np.isnan(fp_times)]
+        return fp_times[~np.isnan(fp_times)], nonexit_x
+
+    # # Play the same role as simulate_fptd_tillT, consider removing
+    # def simulate_fpt_data(self, dt: float = 1e-3, num: int = 1000, T_max: float = np.inf):
+    #     """
+    #     Vectorized simulation of *num* first passage times (FPTs).
+    #     Halts if simulation time t exceeds T_max.
+    #     """
+    #     t = 0.0
+    #     X = self.initialize_X0(t, num)
+    #     active_idx = np.arange(num)
+
+    #     result = np.empty((num, 2))
+    #     result[:] = np.nan  # initialize time column with NaN
+    #     result[:, 1] = 0  # 0 = no exit yet
+
+    #     steps = 0
+    #     while active_idx.size:
+    #         if steps % 10000 == 0:
+    #             print(f"Time step {steps}: {active_idx.size} paths active at t={t:.6f}.")
+    #         if t > T_max:
+    #             print(f"Simulation halted: reached time limit T_max = {T_max}. "
+    #                 f"{active_idx.size} paths did not exit.")
+    #             break
+
+    #         dW = np.random.normal(scale=np.sqrt(dt), size=active_idx.size)
+
+    #         X_prev = X[active_idx]
+    #         drift = self.drift_coeff(X_prev, t)
+    #         diffusion = self.diffusion_coeff(X_prev, t)
+
+    #         X_new = X_prev + drift * dt + diffusion * dW
+
+    #         upper_bound = self.upper_bdy(t + dt)
+    #         lower_bound = self.lower_bdy(t + dt)
+
+    #         hit_u = X_new >= upper_bound
+    #         hit_l = X_new <= lower_bound
+    #         hits = hit_u | hit_l
+
+    #         if np.any(hits):
+    #             exit_time = t + 0.5 * dt
+    #             exited = active_idx[hits]
+    #             result[exited, 0] = exit_time
+    #             result[exited, 1] = np.where(hit_u[hits], 1, -1)
+
+    #         X[active_idx] = X_new
+    #         active_idx = active_idx[~hits]
+    #         t += dt
+    #         steps += 1
+
+    #     return result
+
 
 
 class SingleStageModel(DDModel):
