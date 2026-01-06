@@ -5,8 +5,7 @@ from .utils import check_valid_multistage_params
 
 # Pre-populate with commonly used orders (computed once at import time).
 _GAUSS_LEGENDRE_CACHE = {
-    n: np.polynomial.legendre.leggauss(n)
-    for n in (1, 2, 3, 4, 5, 6, 10, 20, 30)
+    n: np.polynomial.legendre.leggauss(n) for n in (1, 2, 3, 4, 5, 6, 10, 20, 30)
 }
 
 
@@ -36,9 +35,26 @@ def lgwtLookupTable(order, a, b):
     return x, w
 
 
-def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, T, x0, order=30, eps=1e-3, trunc_num=100, threshold=1e-20):
+def get_multistage_densities(
+    t_grid,
+    mu_array,
+    sacc_array,
+    sigma_array,
+    a1,
+    b1_array,
+    a2,
+    b2_array,
+    T,
+    x0,
+    order=30,
+    eps=1e-3,
+    trunc_num=100,
+    threshold=1e-20,
+    *,
+    adaptive_stopping=True,
+):
     """
-    Computes the first-passage time density (FPTD) for a multistage drift-diffusion model (DDM) 
+    Computes the first-passage time density (FPTD) for a multistage drift-diffusion model (DDM)
     on a specified time grid `t_grid`, for both upper and lower absorbing boundaries.
 
     Parameters
@@ -76,11 +92,22 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
         - If a 2D array of shape (2, N), X(0) is a mixture of N point masses.
           where the first row contains weights and the second row contains support points.
 
+    order : int, optional (default=30)
+        Quadrature order used in `lgwtLookupTable`.
+
     eps : float, optional (default=1e-3)
-        Tolerance for ignoring grid points in `t_grid` that are too close to `sacc_array`, to avoid numerical instability.
+        Tolerance for ignoring grid points in `t_grid` that are too close to `sacc_array`,
+        to avoid numerical instability.
 
     trunc_num : int, optional (default=100)
-        Number of terms to keep in the truncated series expansion used for single-stage computations.
+        Maximum number of terms in the truncated series expansion used for single-stage computations.
+
+    threshold : float, optional (default=1e-20)
+        Early-stopping tolerance for the single-stage series expansion.
+
+    adaptive_stopping : bool, optional (default=True)
+        If True, stop early when the current term is smaller than `threshold`.
+        If False, always compute exactly `trunc_num` terms.
 
     Returns
     -------
@@ -102,9 +129,13 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
     b2_array = b2_array[sacc_array < T]
     sacc_array = sacc_array[sacc_array < T]
     d = len(mu_array)  # Number of stages
+
     ##### ASSERTIONS #####
-    check_valid_multistage_params(mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array)
+    check_valid_multistage_params(
+        mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array
+    )
     ##### END OF ASSERTIONS #####
+
     # Initialize
     ub, lb = a1, a2
     if isinstance(x0, np.ndarray) and x0.ndim == 2:
@@ -114,47 +145,93 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
     elif callable(x0):
         xs, ws = lgwtLookupTable(order, lb, ub)
         qs = x0(xs)
+
     xs_prev, ws_prev, qs_prev, ub_prev, lb_prev = xs, ws, qs, ub, lb
     _sacc_array = np.concatenate([sacc_array, [T]])
-    # skipping t that are too close to `sacc_array` to avoid numerical instability issues
+
+    # skip t that are too close to `sacc_array` to avoid numerical instability issues
     t_grid, indices, _ = filter_and_group(_sacc_array, t_grid, epsilon=eps)
     upper_densities = np.zeros_like(t_grid)
     lower_densities = np.zeros_like(t_grid)
+
     for n in range(d):
         ub += b1_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
         lb += b2_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
+
         xs, ws = lgwtLookupTable(order, lb, ub)
-        P = q_single(xs[:, np.newaxis], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], _sacc_array[n + 1] - _sacc_array[n], xs_prev, trunc_num, threshold)
+        P = q_single(
+            xs[:, np.newaxis],
+            mu_array[n],
+            sigma_array[n],
+            ub_prev,
+            b1_array[n],
+            lb_prev,
+            b2_array[n],
+            _sacc_array[n + 1] - _sacc_array[n],
+            xs_prev,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            adaptive_stopping=adaptive_stopping,
+        )
+
         if len(indices[n]) > 0:
-            U = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, 1, trunc_num, threshold)
-            L = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, -1, trunc_num, threshold)
+            U = fptd_single(
+                t_grid[indices[n]][:, np.newaxis] - _sacc_array[n],
+                mu_array[n],
+                sigma_array[n],
+                ub_prev,
+                b1_array[n],
+                lb_prev,
+                b2_array[n],
+                xs_prev,
+                1,
+                trunc_num=trunc_num,
+                threshold=threshold,
+                adaptive_stopping=adaptive_stopping,
+            )
+            L = fptd_single(
+                t_grid[indices[n]][:, np.newaxis] - _sacc_array[n],
+                mu_array[n],
+                sigma_array[n],
+                ub_prev,
+                b1_array[n],
+                lb_prev,
+                b2_array[n],
+                xs_prev,
+                -1,
+                trunc_num=trunc_num,
+                threshold=threshold,
+                adaptive_stopping=adaptive_stopping,
+            )
             upper_densities[indices[n]] = np.sum(ws_prev * qs_prev * U, axis=1)
             lower_densities[indices[n]] = np.sum(ws_prev * qs_prev * L, axis=1)
+
         qs = np.sum(ws_prev * qs_prev * P, axis=1)
         xs_prev, ws_prev, qs_prev, ub_prev, lb_prev = xs, ws, qs, ub, lb
+
     return np.vstack([t_grid, upper_densities, lower_densities]), np.vstack([xs, qs])
 
 
 def filter_and_group(a, x, epsilon=1e-3):
     """
-    Filters and groups values of `x` into open intervals defined by consecutive 
+    Filters and groups values of `x` into open intervals defined by consecutive
     elements in `a`, excluding any values within `epsilon` of the interval boundaries.
 
     Parameters:
     ----------
     a : array-like of shape (d + 1,)
         Sorted array defining `d` open intervals of the form (a[i], a[i+1]).
-    
+
     x : array-like
         Sorted array of values to be filtered and assigned to the intervals defined by `a`.
-    
+
     epsilon : float, optional (default=1e-3)
         Tolerance for excluding values that are too close to the interval boundaries.
 
     Returns:
     -------
     filtered_x : np.ndarray
-        Array of values from `x` that lie strictly inside one of the intervals 
+        Array of values from `x` that lie strictly inside one of the intervals
         (a[i], a[i+1]), excluding points near the boundaries.
 
     classified_indices : list of lists
