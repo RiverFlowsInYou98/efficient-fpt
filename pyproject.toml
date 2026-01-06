@@ -11,9 +11,25 @@ authors = [
 ]
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 dependencies = [
     "numpy",
+]
+
+[project.optional-dependencies]
+jax = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+]
+test = [
+    "pytest>=7.0",
+    "pytest-xdist",
+]
+all = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "pytest>=7.0",
+    "pytest-xdist",
 ]
 
 [project.urls]
