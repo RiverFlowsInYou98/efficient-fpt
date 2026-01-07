@@ -14,9 +14,8 @@ from .single_stage import (
     fptd_single_jax,
     q_single_jax,
 )
-from .multi_stage import get_addm_fptd_jax, pad_sacc_array_safely
-from .batch import compute_likelihoods_batch, compute_nll_batch
-from .utils import lgwt_lookup_table, GAUSS_LEGENDRE_30_X, GAUSS_LEGENDRE_30_W
+from .multi_stage import get_addm_fptd_jax, get_addm_fptd_jax_fast, pad_sacc_array_safely
+from .utils import GAUSS_LEGENDRE_30_X, GAUSS_LEGENDRE_30_W
 
 __all__ = [
     # Single-stage functions
@@ -26,12 +25,9 @@ __all__ = [
     "q_single_jax",
     # Multi-stage functions
     "get_addm_fptd_jax",
-    "pad_sacc_array_safely",  # Helper for understanding safe padding
-    # Batch computation
-    "compute_likelihoods_batch",
-    "compute_nll_batch",
+    "get_addm_fptd_jax_fast",  # Optimized version with faster gradients
+    "pad_sacc_array_safely",
     # Utilities
-    "lgwt_lookup_table",
     "GAUSS_LEGENDRE_30_X",
     "GAUSS_LEGENDRE_30_W",
 ]

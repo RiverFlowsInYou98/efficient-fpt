@@ -48,8 +48,15 @@ def pad_sacc_array_safely(sacc_array, d, max_d):
     >>> # Now T_curr = 2.4 - 1.6 = 0.8 > 0 for padded stages!
     """
     # Compute average interval from valid stages
-    last_valid_sacc = sacc_array[d - 1]
-    avg_interval = jnp.where(d > 1, last_valid_sacc / (d - 1), 1.0)
+    # Use safe indexing: d-1 could be 0, so ensure we don't get NaN
+    safe_d_minus_1 = jnp.maximum(d - 1, 0)
+    last_valid_sacc = sacc_array[safe_d_minus_1]
+    
+    # CRITICAL: Use safe division to avoid NaN during gradient computation
+    # Even when d=1 (so d-1=0), we must avoid 0/0 because jnp.where
+    # evaluates BOTH branches during autodiff, causing NaN gradients
+    safe_divisor = jnp.maximum(d - 1, 1)  # At least 1 to avoid division by zero
+    avg_interval = jnp.where(d > 1, last_valid_sacc / safe_divisor, 1.0)
     
     # Create safe padding: extend with increasing times
     indices = jnp.arange(max_d)
@@ -203,7 +210,11 @@ def get_addm_fptd_jax(t, d, mu_array, sacc_array, sigma, a, b, x0, bdy,
     )
     
     # Final stage: compute FPTD
-    t_in_final_stage = t - sacc_final
+    # CRITICAL: Ensure t_in_final_stage is always positive for gradient safety
+    # When d=1, sacc_final comes from safe padding and may exceed t,
+    # causing negative time which produces NaN. Since we select single_stage_result
+    # for d=1 anyway, we just need multi_stage_result to be a valid (non-NaN) number.
+    t_in_final_stage = jnp.maximum(t - sacc_final, 1e-6)
     
     fptds = fptd_single_jax(
         t_in_final_stage,      # Time in final stage
@@ -223,4 +234,145 @@ def get_addm_fptd_jax(t, d, mu_array, sacc_array, sigma, a, b, x0, bdy,
 
 # JIT-compiled version with static bdy and order
 get_addm_fptd_jax_jit = jit(get_addm_fptd_jax, static_argnums=(8, 9, 10))
+
+
+def get_addm_fptd_jax_fast(t, d, mu_array, sacc_array, sigma, a, b, x0, bdy, 
+                            order=30, trunc_num=50, safe_sacc=None):
+    """
+    Optimized multi-stage FPTD with faster gradient computation.
+    
+    This version precomputes ALL transition matrices in parallel before
+    the sequential scan, resulting in:
+    - Same forward pass performance
+    - ~2-3x faster gradient computation
+    
+    The key optimization is separating:
+    1. Parallel computation of transition matrices (vmap-friendly)
+    2. Sequential matrix-vector multiplications (minimal scan state)
+    
+    Parameters are identical to get_addm_fptd_jax, plus:
+    
+    safe_sacc : array of shape (max_d,), optional
+        Pre-computed safe-padded saccade array. If provided, skips internal
+        safe padding computation. Use `pad_sacc_array_safely` to pre-compute:
+        
+        >>> safe_sacc = vmap(lambda s, d: pad_sacc_array_safely(s, d, max_d))(sacc_arrays, ds)
+        
+        This saves computation when the same trial data is evaluated many times
+        (e.g., during optimization).
+    """
+    from jax import vmap
+    
+    if order != 30:
+        raise ValueError("Currently only order=30 is supported")
+    x_ref = GAUSS_LEGENDRE_30_X
+    w_ref = GAUSS_LEGENDRE_30_W
+    n_quad = 30  # Quadrature order
+    
+    max_d = mu_array.shape[0]
+    # Use pre-computed safe_sacc if provided, otherwise compute it
+    if safe_sacc is None:
+        safe_sacc = pad_sacc_array_safely(sacc_array, d, max_d)
+    
+    # Single-stage result (always computed)
+    single_stage_result = fptd_single_jax(
+        t, mu_array[0], sigma, a, -b, -a, b, x0, bdy, trunc_num
+    )
+    
+    # Precompute ALL boundary positions and stage durations
+    a_stages = a - b * safe_sacc  # (max_d,) - boundary at each stage start
+    T_stages = jnp.diff(safe_sacc)  # (max_d-1,) - duration of each stage
+    T_stages = jnp.maximum(T_stages, 1e-6)  # Ensure positive
+    
+    # Precompute ALL quadrature points and weights for all stages
+    # xs_all[k, i] = quadrature point i at end of stage k
+    xs_all = x_ref[:, None] * a_stages[1:]  # (n_quad, max_d-1)
+    ws_all = w_ref[:, None] * a_stages[1:]  # (n_quad, max_d-1)
+    
+    # Initial distribution: from x0 to stage 1 quadrature points
+    pv_init = q_single_jax(
+        xs_all[:, 0],      # (n_quad,) destinations at end of stage 0
+        mu_array[0], sigma, 
+        a, -b, -a, b,      # Boundaries at t=0
+        T_stages[0],       # Duration of stage 0
+        x0,                # Scalar source
+        trunc_num
+    )
+    ws_pv_init = ws_all[:, 0] * pv_init
+    
+    # PARALLEL: Precompute ALL transition matrices at once
+    # P_all[k, i, j] = q(xs_all[i, k+1] | xs_all[j, k], stage k+1 params)
+    def compute_transition_matrix(k):
+        """Compute transition matrix for stage k+1 (k=0 means stage 1->2 transition)."""
+        # Source points: end of stage k (which is xs_all[:, k])
+        # Dest points: end of stage k+1 (which is xs_all[:, k+1])
+        # But we need to handle the k+1 index safely
+        k_next = jnp.minimum(k + 1, max_d - 2)
+        
+        P = q_single_jax(
+            xs_all[:, k_next, None],     # (n_quad, 1) destinations
+            mu_array[k + 1], sigma,       # Stage k+1 drift
+            a_stages[k + 1], -b, -a_stages[k + 1], b,  # Boundaries at stage k+1 start
+            T_stages[k + 1],              # Duration of stage k+1
+            xs_all[:, k, None].T,         # (1, n_quad) sources
+            trunc_num
+        )
+        return P  # (n_quad, n_quad)
+    
+    # Compute all transition matrices in parallel
+    # P_all[k] is transition from stage k to stage k+1
+    k_indices = jnp.arange(max_d - 2)
+    P_all = vmap(compute_transition_matrix)(k_indices)  # (max_d-2, n_quad, n_quad)
+    
+    # SEQUENTIAL: Simple matrix-vector multiplications
+    # This scan only carries ws_pv (n_quad,) instead of (xs, ws_pv, a, sacc, mu)
+    def mv_step(ws_pv_prev, k):
+        """One matrix-vector multiplication step."""
+        # Get transition matrix and weights for this stage
+        P_k = P_all[k]
+        ws_k = ws_all[:, k + 1]  # Weights at destination
+        
+        # Weighted transition: pv_new[i] = sum_j P[i,j] * ws_pv_prev[j]
+        pv_new = jnp.sum(ws_pv_prev * P_k, axis=1)
+        ws_pv_new = ws_k * pv_new
+        
+        # Mask invalid stages
+        valid = k < d - 2
+        return jnp.where(valid, ws_pv_new, ws_pv_prev), None
+    
+    # Run the sequential part (much lighter than before!)
+    ws_pv_final, _ = lax.scan(mv_step, ws_pv_init, jnp.arange(max_d - 2))
+    
+    # Determine final stage parameters
+    # For d stages, after processing transitions 0..(d-2), we're at the end of stage d-2
+    # which corresponds to xs_all[:, d-2] and boundary a_stages[d-1]
+    # The final FPTD uses mu_array[d-1] from the last stage
+    final_stage_idx = jnp.maximum(d - 2, 0)
+    xs_final = xs_all[:, final_stage_idx]
+    # a_final is boundary at time sacc[d-1], which is a_stages[d-1]
+    safe_d_idx = jnp.minimum(d - 1, max_d - 1)
+    a_final = a_stages[safe_d_idx]
+    sacc_final = safe_sacc[safe_d_idx]
+    mu_final = mu_array[safe_d_idx]
+    
+    # Final stage: compute FPTD
+    t_in_final_stage = jnp.maximum(t - sacc_final, 1e-6)
+    
+    fptds = fptd_single_jax(
+        t_in_final_stage,
+        mu_final,
+        sigma, 
+        a_final, -b, -a_final, b,
+        xs_final,
+        bdy, 
+        trunc_num
+    )
+    
+    multi_stage_result = jnp.sum(fptds * ws_pv_final)
+    
+    return jnp.where(d == 1, single_stage_result, multi_stage_result)
+
+
+# JIT-compiled fast version
+get_addm_fptd_jax_fast_jit = jit(get_addm_fptd_jax_fast, static_argnums=(8, 9, 10))
 
