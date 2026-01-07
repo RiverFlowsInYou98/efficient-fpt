@@ -1,3 +1,7 @@
+# AF extras
+src/efficient_fpt/*.c
+src/efficient_fpt/*.so
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

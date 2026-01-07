@@ -54,7 +54,7 @@ def lgwtLookupTable(order, a, b):
     return x, w
 
 
-def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, T, x0, eps=1e-3, trunc_num=100, threshold=1e-20):
+def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, T, x0, eps=1e-3, trunc_num=100, threshold=1e-20, fixed_terms=False):
     """
     Computes the first-passage time density (FPTD) for a multistage drift-diffusion model (DDM) 
     on a specified time grid `t_grid`, for both upper and lower absorbing boundaries.
@@ -99,6 +99,10 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
 
     trunc_num : int, optional (default=100)
         Number of terms to keep in the truncated series expansion used for single-stage computations.
+
+    fixed_terms : bool, optional (default=False)
+        If True, always compute exactly `trunc_num` terms without early termination.
+        Useful for testing equivalence with JAX implementation.
 
     Returns
     -------
@@ -147,10 +151,10 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
             xs, ws = lgwtLookupTable(30, lb, ub)
         else:  # n == d - 1
             xs, ws = lgwtLookupTable(30, lb, ub)
-        P = q_single(xs[:, np.newaxis], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], _sacc_array[n + 1] - _sacc_array[n], xs_prev, trunc_num, threshold)
+        P = q_single(xs[:, np.newaxis], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], _sacc_array[n + 1] - _sacc_array[n], xs_prev, trunc_num, threshold, fixed_terms)
         if len(indices[n]) > 0:
-            U = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, 1, trunc_num, threshold)
-            L = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, -1, trunc_num, threshold)
+            U = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, 1, trunc_num, threshold, fixed_terms)
+            L = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, -1, trunc_num, threshold, fixed_terms)
             upper_densities[indices[n]] = np.sum(ws_prev * qs_prev * U, axis=1)
             lower_densities[indices[n]] = np.sum(ws_prev * qs_prev * L, axis=1)
         qs = np.sum(ws_prev * qs_prev * P, axis=1)
