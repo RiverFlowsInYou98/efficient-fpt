@@ -21,6 +21,10 @@ jax = [
     "jax>=0.4.0",
     "jaxlib>=0.4.0",
 ]
+pymc = [
+    "pymc>=5.0",
+    "arviz>=0.15.0",
+]
 test = [
     "pytest>=7.0",
     "pytest-xdist",
@@ -28,6 +32,8 @@ test = [
 all = [
     "jax>=0.4.0",
     "jaxlib>=0.4.0",
+    "pymc>=5.0",
+    "arviz>=0.15.0",
     "pytest>=7.0",
     "pytest-xdist",
 ]
