@@ -45,7 +45,8 @@ def lgwtLookupTable(order, a, b):
         x = np.array([-0.9968934840746495, -0.9836681232797473, -0.9600218649683075, -0.9262000474292743, -0.8825605357920526, -0.8295657623827684, -0.7677774321048262, -0.6978504947933158, -0.6205261829892429, -0.5366241481420199, -0.44703376953808915, -0.3527047255308781, -0.25463692616788985, -0.15386991360858354, -0.0514718425553177, 0.0514718425553177, 0.15386991360858354, 0.25463692616788985, 0.3527047255308781, 0.44703376953808915, 0.5366241481420199, 0.6205261829892429, 0.6978504947933158, 0.7677774321048262, 0.8295657623827684, 0.8825605357920526, 0.9262000474292743, 0.9600218649683075, 0.9836681232797473, 0.9968934840746495])
         w = np.array([0.007968192496169523, 0.018466468311091087, 0.028784707883322873, 0.03879919256962679, 0.048402672830594434, 0.05749315621761909, 0.06597422988218032, 0.0737559747377048, 0.08075589522941981, 0.0868997872010827, 0.09212252223778579, 0.09636873717464399, 0.09959342058679493, 0.10176238974840521, 0.10285265289355848, 0.10285265289355848, 0.10176238974840521, 0.09959342058679493, 0.09636873717464399, 0.09212252223778579, 0.0868997872010827, 0.08075589522941981, 0.0737559747377048, 0.06597422988218032, 0.05749315621761909, 0.048402672830594434, 0.03879919256962679, 0.028784707883322873, 0.018466468311091087, 0.007968192496169523])
     else:
-        raise ValueError("Order not supported")
+        # raise ValueError("Order not supported")
+        x, w = np.polynomial.legendre.leggauss(order)
 
     # Adjust nodes and weights to the interval [a, b]
     x = x * (b - a) / 2 + (b + a) / 2
@@ -54,7 +55,7 @@ def lgwtLookupTable(order, a, b):
     return x, w
 
 
-def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, T, x0, eps=1e-3, trunc_num=100, threshold=1e-20):
+def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, T, x0, order=30, eps=1e-3, trunc_num=100, threshold=1e-20):
     """
     Computes the first-passage time density (FPTD) for a multistage drift-diffusion model (DDM) 
     on a specified time grid `t_grid`, for both upper and lower absorbing boundaries.
@@ -130,7 +131,7 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
         xs = x0[1]
         qs = np.ones_like(ws)
     elif callable(x0):
-        xs, ws = lgwtLookupTable(30, lb, ub)
+        xs, ws = lgwtLookupTable(order, lb, ub)
         qs = x0(xs)
     xs_prev, ws_prev, qs_prev, ub_prev, lb_prev = xs, ws, qs, ub, lb
     _sacc_array = np.concatenate([sacc_array, [T]])
@@ -142,11 +143,11 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
         ub += b1_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
         lb += b2_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
         if n < d - 2:
-            xs, ws = lgwtLookupTable(30, lb, ub)
+            xs, ws = lgwtLookupTable(order, lb, ub)
         elif n == d - 2:
-            xs, ws = lgwtLookupTable(30, lb, ub)
+            xs, ws = lgwtLookupTable(order, lb, ub)
         else:  # n == d - 1
-            xs, ws = lgwtLookupTable(30, lb, ub)
+            xs, ws = lgwtLookupTable(order, lb, ub)
         P = q_single(xs[:, np.newaxis], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], _sacc_array[n + 1] - _sacc_array[n], xs_prev, trunc_num, threshold)
         if len(indices[n]) > 0:
             U = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, 1, trunc_num, threshold)
