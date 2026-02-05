@@ -1153,7 +1153,7 @@ cpdef double compute_loss_parallel(np.ndarray[double, ndim=1] mu1_data, \
 @boundscheck(False)
 @wraparound(False)
 @cdivision(True)
-cpdef double compute_glamloss_parallel(np.ndarray[double, ndim=1] mu1_data, \
+cpdef double compute_tadaloss_parallel(np.ndarray[double, ndim=1] mu1_data, \
                                        np.ndarray[double, ndim=1] mu2_data, \
                                        np.ndarray[double, ndim=1] rt_data, \
                                        np.ndarray[int, ndim=1] choice_data, \
@@ -1168,17 +1168,17 @@ cpdef double compute_glamloss_parallel(np.ndarray[double, ndim=1] mu1_data, \
         np.ndarray[double, ndim=2] mu_data=get_mu_array_data_padded(mu1_data, mu2_data, max_d, flag_data, length_data)
         double[:, :] mu_data_view = mu_data
         double[:, :] sacc_data_view = sacc_data
-        double[:] mu_glam_data = np.zeros(num_data)
+        double[:] mu_tada_data = np.zeros(num_data)
     for n in range(num_data):
         L = length_data[n] # effective length for this trial
         mu_sum = 0.0
         for i in range(L - 1):
             mu_sum += mu_data_view[n, i] * (sacc_data_view[n, i + 1] - sacc_data_view[n, i])
         mu_sum += mu_data_view[n, L - 1] * (rt_data[n] - sacc_data_view[n, L - 1])
-        mu_glam_data[n] = mu_sum / rt_data[n]
+        mu_tada_data[n] = mu_sum / rt_data[n]
     max_num_threads = omp_get_max_threads()
     for n in prange(num_data, nogil=True, schedule='dynamic', num_threads=max_num_threads):
-        likelihood = fptd_single_cy(rt_data[n], mu_glam_data[n], sigma, a, -b, -a, b, x0, choice_data[n], 100, threshold)
+        likelihood = fptd_single_cy(rt_data[n], mu_tada_data[n], sigma, a, -b, -a, b, x0, choice_data[n], 100, threshold)
         if likelihood > 0:
             loss = -log(likelihood)
         else:
