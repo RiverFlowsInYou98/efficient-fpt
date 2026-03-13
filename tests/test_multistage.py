@@ -38,5 +38,3 @@ def test_multi_stage_fptd():
     print(-np.log(result_cy))
 
     assert np.allclose(result_cy, result_np, atol=1e-10)
-    
-test_multi_stage_fptd()
