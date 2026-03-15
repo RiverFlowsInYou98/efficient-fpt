@@ -40,6 +40,12 @@ extensions = [
         extra_compile_args=base_compile_args + omp_compile_args,
         extra_link_args=omp_link_args,
     ),
+    Extension(
+        "efficient_fpt.addm_simulator_cy",  # no OpenMP
+        sources=["src/efficient_fpt/addm_simulator_cy.pyx"],
+        include_dirs=[numpy.get_include()],
+        extra_compile_args=base_compile_args,
+    ),
 ]
 
 setup(
@@ -53,6 +59,7 @@ setup(
             "boundscheck": False,
             "wraparound": False,
             "cdivision": True,
+            "initializedcheck": False,
         },
     ),
 )
