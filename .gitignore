@@ -182,3 +182,7 @@ examples/example4_new/timing
 examples/example5_error/error_analyses_scratch.ipynb
 
 misc/
+
+src/efficient_fpt/*.c
+src/efficient_fpt/*.so
+src/efficient_fpt/*.pyd
