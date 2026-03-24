@@ -7,6 +7,17 @@ Hall, W. J. (1997). The distribution of Brownian motion on linear stopping bound
 """
 
 
+def _zeros_like_input(x):
+    arr = np.asarray(x, dtype=np.float64)
+    out = np.zeros_like(arr, dtype=np.float64)
+    return float(out) if out.ndim == 0 else out
+
+
+def _return_matching_shape(out):
+    out = np.asarray(out, dtype=np.float64)
+    return float(out) if out.ndim == 0 else out
+
+
 def fptd_basic(t, mu, a1, b1, a2, b2, bdy, trunc_num=100, threshold=1e-20):
     """
     First passage time density of Brownian motion with drift starting at x0 = 0 to
@@ -18,23 +29,31 @@ def fptd_basic(t, mu, a1, b1, a2, b2, bdy, trunc_num=100, threshold=1e-20):
     a_bar = (a1 + a2) / 2
     b = (b2 - b1) / 2
     c = a1 - a2
+    t = np.asarray(t, dtype=np.float64)
+    valid = t > 0
+    if b2 > b1:
+        t_max = c / (b2 - b1)
+        valid = valid & (t < t_max)
+    if not np.any(valid):
+        return _zeros_like_input(t)
+    t_safe = np.where(valid, t, 1.0)
 
     if bdy == 1:
         delta = mu - b1
-        factor = t ** (-1.5) / sqrt(2 * pi) * exp(-b / c * a1**2 + a1 * delta - 0.5 * delta**2 * t)
+        factor = t_safe ** (-1.5) / sqrt(2 * pi) * exp(-b / c * a1**2 + a1 * delta - 0.5 * delta**2 * t_safe)
     elif bdy == -1:
         delta = -mu + b2
-        factor = t ** (-1.5) / sqrt(2 * pi) * exp(-b / c * a2**2 - a2 * delta - 0.5 * delta**2 * t)
+        factor = t_safe ** (-1.5) / sqrt(2 * pi) * exp(-b / c * a2**2 - a2 * delta - 0.5 * delta**2 * t_safe)
     else:
         raise ValueError("bdy must be 1 or -1")
     result = 0
     for j in range(trunc_num):
         rj = (j + 0.5) * c + bdy * (-1) ** j * a_bar
-        term = (-1) ** j * rj * exp((b / c - 1 / (2 * t)) * rj**2)
+        term = (-1) ** j * rj * exp((b / c - 1 / (2 * t_safe)) * rj**2)
         if np.max(np.abs(term)) < threshold:
             break
         result += term
-    return result * factor
+    return _return_matching_shape(np.where(valid, result * factor, 0.0))
 
 
 def q_basic(x, mu, a1, b1, a2, b2, T, trunc_num=100, threshold=1e-20):
@@ -48,12 +67,24 @@ def q_basic(x, mu, a1, b1, a2, b2, T, trunc_num=100, threshold=1e-20):
     Note: set a1 = -a2 = a, b1 = b2 = -b to recover the symmetric case
     x shoud be in (l(T), u(T)), otherwise the density is 0
     """
+    if T <= 0:
+        return _zeros_like_input(x)
     a_bar = (a1 + a2) / 2
     b = (b2 - b1) / 2
     b_bar = (b1 + b2) / 2
     c = a1 - a2
-    y = x - b_bar * T
-    factor = exp((mu - b_bar) * x - 0.5 * (mu**2 - b_bar**2) * T) / sqrt(T)
+    x = np.asarray(x, dtype=np.float64)
+    upper_T = a1 + b1 * T
+    lower_T = a2 + b2 * T
+    valid = (x > lower_T) & (x < upper_T)
+    if b2 > b1:
+        t_max = c / (b2 - b1)
+        valid = valid & (T < t_max)
+    if not np.any(valid):
+        return _zeros_like_input(x)
+    x_safe = np.where(valid, x, 0.0)
+    y = x_safe - b_bar * T
+    factor = exp((mu - b_bar) * x_safe - 0.5 * (mu**2 - b_bar**2) * T) / sqrt(T)
     result = 1 / sqrt(2 * pi) * exp(-(y**2) / (2 * T))
     for j in range(1, trunc_num):
         t1 = 4 * b * j * (j * c - a_bar) - (y - 2 * j * c) ** 2 / (2 * T)
@@ -64,7 +95,7 @@ def q_basic(x, mu, a1, b1, a2, b2, T, trunc_num=100, threshold=1e-20):
         if np.max(np.abs(term)) < threshold:
             break
         result += term / sqrt(2 * pi)
-    return result * factor
+    return _return_matching_shape(np.where(valid, result * factor, 0.0))
 
 
 def fptd_single(t, mu, sigma, a1, b1, a2, b2, x0, bdy, trunc_num=100, threshold=1e-20):

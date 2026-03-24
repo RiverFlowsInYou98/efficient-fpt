@@ -3,55 +3,36 @@ from .single_stage import fptd_single, q_single
 from .utils import check_valid_multistage_params
 
 
+# Pre-populate with commonly used orders (computed once at import time).
+_GAUSS_LEGENDRE_CACHE = {
+    n: np.polynomial.legendre.leggauss(n)
+    for n in (1, 2, 3, 4, 5, 6, 10, 20, 30)
+}
+
+
 def lgwtLookupTable(order, a, b):
-    """
-    Look up Gauss-Legendre quadrature nodes and weights on the interval [a, b] for a given order.
-    `x_ref` and `w_ref` are nodes and weights on the reference interval [-1, 1],
-    which can be obtained from `x_ref, w_ref = np.polynomial.legendre.leggauss(orders)`
-    Parameters:
-        order (int): The order of the Gauss-Legendre quadrature.
-        a (float): Lower limit of integration.
-        b (float): Upper limit of integration.
+    """Gauss-Legendre quadrature nodes and weights on the interval [a, b].
 
-    Returns:
-        x (np.ndarray): Nodes.
-        w (np.ndarray): Weights.
-    """
-    if order == 1:
-        x = np.array([0.0])
-        w = np.array([2.0])
-    elif order == 2:
-        x = np.array([-0.5773502691896257, 0.5773502691896257])
-        w = np.array([1.0, 1.0])
-    elif order == 3:
-        x = np.array([-0.7745966692414834, 0.0, 0.7745966692414834])
-        w = np.array([0.5555555555555557, 0.8888888888888888, 0.5555555555555557])
-    elif order == 4:
-        x = np.array([-0.8611363115940526, -0.33998104358485626, 0.33998104358485626, 0.8611363115940526])
-        w = np.array([0.3478548451374537, 0.6521451548625462, 0.6521451548625462, 0.3478548451374537])
-    elif order == 5:
-        x = np.array([-0.906179845938664, -0.5384693101056831, 0.0, 0.5384693101056831, 0.906179845938664])
-        w = np.array([0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891])
-    elif order == 6:
-        x = np.array([-0.93246951, -0.66120939, -0.23861919, 0.23861919, 0.66120939, 0.93246951])
-        w = np.array([0.17132449, 0.36076157, 0.46791393, 0.46791393, 0.36076157, 0.17132449])
-    elif order == 10:
-        x = np.array([-0.97390653, -0.86506337, -0.67940957, -0.43339539, -0.14887434, 0.14887434, 0.43339539, 0.67940957, 0.86506337, 0.97390653])
-        w = np.array([0.06667134, 0.14945135, 0.21908636, 0.26926672, 0.29552422, 0.29552422, 0.26926672, 0.21908636, 0.14945135, 0.06667134])
-    elif order == 20:
-        x = np.array([-0.9931285991850949, -0.9639719272779138, -0.9122344282513258, -0.8391169718222188, -0.7463319064601508, -0.636053680726515, -0.5108670019508271, -0.37370608871541955, -0.2277858511416451, -0.07652652113349734, 0.07652652113349734, 0.2277858511416451, 0.37370608871541955, 0.5108670019508271, 0.636053680726515, 0.7463319064601508, 0.8391169718222188, 0.9122344282513258, 0.9639719272779138, 0.9931285991850949])
-        w = np.array([0.017614007139153273, 0.04060142980038622, 0.06267204833410944, 0.08327674157670467, 0.10193011981724026, 0.11819453196151825, 0.13168863844917653, 0.14209610931838187, 0.14917298647260366, 0.15275338713072578, 0.15275338713072578, 0.14917298647260366, 0.14209610931838187, 0.13168863844917653, 0.11819453196151825, 0.10193011981724026, 0.08327674157670467, 0.06267204833410944, 0.04060142980038622, 0.017614007139153273])
-    elif order == 30:
-        x = np.array([-0.9968934840746495, -0.9836681232797473, -0.9600218649683075, -0.9262000474292743, -0.8825605357920526, -0.8295657623827684, -0.7677774321048262, -0.6978504947933158, -0.6205261829892429, -0.5366241481420199, -0.44703376953808915, -0.3527047255308781, -0.25463692616788985, -0.15386991360858354, -0.0514718425553177, 0.0514718425553177, 0.15386991360858354, 0.25463692616788985, 0.3527047255308781, 0.44703376953808915, 0.5366241481420199, 0.6205261829892429, 0.6978504947933158, 0.7677774321048262, 0.8295657623827684, 0.8825605357920526, 0.9262000474292743, 0.9600218649683075, 0.9836681232797473, 0.9968934840746495])
-        w = np.array([0.007968192496169523, 0.018466468311091087, 0.028784707883322873, 0.03879919256962679, 0.048402672830594434, 0.05749315621761909, 0.06597422988218032, 0.0737559747377048, 0.08075589522941981, 0.0868997872010827, 0.09212252223778579, 0.09636873717464399, 0.09959342058679493, 0.10176238974840521, 0.10285265289355848, 0.10285265289355848, 0.10176238974840521, 0.09959342058679493, 0.09636873717464399, 0.09212252223778579, 0.0868997872010827, 0.08075589522941981, 0.0737559747377048, 0.06597422988218032, 0.05749315621761909, 0.048402672830594434, 0.03879919256962679, 0.028784707883322873, 0.018466468311091087, 0.007968192496169523])
-    else:
-        # raise ValueError("Order not supported")
-        x, w = np.polynomial.legendre.leggauss(order)
+    Parameters
+    ----------
+    order : int
+        The order of the Gauss-Legendre quadrature.
+    a, b : float
+        Integration limits.
 
-    # Adjust nodes and weights to the interval [a, b]
+    Returns
+    -------
+    x : np.ndarray
+        Nodes on [a, b].
+    w : np.ndarray
+        Weights on [a, b].
+    """
+    if order not in _GAUSS_LEGENDRE_CACHE:
+        _GAUSS_LEGENDRE_CACHE[order] = np.polynomial.legendre.leggauss(order)
+    x, w = _GAUSS_LEGENDRE_CACHE[order]
+    # Map from [-1, 1] to [a, b]
     x = x * (b - a) / 2 + (b + a) / 2
     w = w * (b - a) / 2
-
     return x, w
 
 
@@ -142,12 +123,7 @@ def get_multistage_densities(t_grid, mu_array, sacc_array, sigma_array, a1, b1_a
     for n in range(d):
         ub += b1_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
         lb += b2_array[n] * (_sacc_array[n + 1] - _sacc_array[n])
-        if n < d - 2:
-            xs, ws = lgwtLookupTable(order, lb, ub)
-        elif n == d - 2:
-            xs, ws = lgwtLookupTable(order, lb, ub)
-        else:  # n == d - 1
-            xs, ws = lgwtLookupTable(order, lb, ub)
+        xs, ws = lgwtLookupTable(order, lb, ub)
         P = q_single(xs[:, np.newaxis], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], _sacc_array[n + 1] - _sacc_array[n], xs_prev, trunc_num, threshold)
         if len(indices[n]) > 0:
             U = fptd_single(t_grid[indices[n]][:, np.newaxis] - _sacc_array[n], mu_array[n], sigma_array[n], ub_prev, b1_array[n], lb_prev, b2_array[n], xs_prev, 1, trunc_num, threshold)

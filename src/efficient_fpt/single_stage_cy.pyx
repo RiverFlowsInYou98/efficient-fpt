@@ -6,6 +6,7 @@
 import numpy as np
 cimport numpy as np
 from libc.math cimport exp, sqrt, pow, M_PI, fabs, log
+from libc.stdio cimport fprintf, stderr
 from cython cimport boundscheck, wraparound, cdivision, language_level
 
 @boundscheck(False)
@@ -24,6 +25,10 @@ cpdef inline double fptd_basic_cy(double t, double mu, double a1, double b1, dou
     cdef double c = a1 - a2
     cdef double delta, factor, result = 0, rj, term
     cdef int j
+    if t <= 0.0:
+        return 0.0
+    if b2 > b1 and t >= c / (b2 - b1):
+        return 0.0
     if bdy == 1:
         delta = mu - b1
         factor = pow(t, -1.5) / sqrt(2 * M_PI) * exp(-b / c * a1**2 + a1 * delta - 0.5 * delta**2 * t)
@@ -31,13 +36,16 @@ cpdef inline double fptd_basic_cy(double t, double mu, double a1, double b1, dou
         delta = -mu + b2
         factor = pow(t, -1.5) / sqrt(2 * M_PI) * exp(-b / c * a2**2 - a2 * delta - 0.5 * delta**2 * t)
     else:
-        raise ValueError("bdy must be 1 or -1")
+        fprintf(stderr, "fptd_basic_cy: invalid bdy=%d, returning 0.0\n", bdy)
+        return 0.0
+    cdef double sign = 1.0
     for j in range(trunc_num):
-        rj = (j + 0.5) * c + bdy * (-1) ** j * a_bar
-        term = (-1) ** j * rj * exp((b / c - 1 / (2 * t)) * rj**2)
+        rj = (j + 0.5) * c + bdy * sign * a_bar
+        term = sign * rj * exp((b / c - 1 / (2 * t)) * rj**2)
         if fabs(term) < threshold:
             break
         result += term
+        sign = -sign
     return result * factor
 
 
@@ -59,6 +67,16 @@ cpdef inline double q_basic_cy(double x, double mu, double a1, double b1, double
     cdef double b = (b2 - b1) / 2
     cdef double b_bar = (b1 + b2) / 2
     cdef double c = a1 - a2
+    cdef double upper_T
+    cdef double lower_T
+    if T <= 0.0:
+        return 0.0
+    if b2 > b1 and T >= c / (b2 - b1):
+        return 0.0
+    upper_T = a1 + b1 * T
+    lower_T = a2 + b2 * T
+    if x <= lower_T or x >= upper_T:
+        return 0.0
     cdef double y = x - b_bar * T
     cdef double factor = exp((mu - b_bar) * x - 0.5 * (mu**2 - b_bar**2) * T) / sqrt(T)
     cdef double result = 1 / sqrt(2 * M_PI) * exp(-(y**2) / (2 * T))
@@ -92,4 +110,3 @@ cpdef inline double q_single_cy(double x, double mu, double sigma, double a1, do
     a2 = (a2 - x0) / sigma
     b2 = b2 / sigma
     return q_basic_cy(x, mu, a1, b1, a2, b2, T, trunc_num, threshold) / sigma
-
