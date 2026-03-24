@@ -7,7 +7,9 @@ from efficient_fpt.utils import check_valid_multistage_params
 
 import numpy as np
 
+
 def test_multi_stage_fptd():
+    """Cython FPTD matches Python reference for a 10-stage problem."""
     sigma = 1.0
     a = 1.5
     b = 0.3
@@ -25,18 +27,14 @@ def test_multi_stage_fptd():
     b1_array = np.full(d, -b, dtype=np.float64)
     b2_array = np.full(d, b, dtype=np.float64)
     check_valid_multistage_params(mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array)
-    # Run tests
-    result_cy = np.zeros(d, dtype=np.float64)
 
+    # Cython path: evaluate FPTD one stage at a time
+    result_cy = np.zeros(d, dtype=np.float64)
     for n in range(d):
         result_cy[n] = get_addm_fptd_cy(rt_array[n], n + 1, mu_array, sacc_array, sigma, a, b, x0, 1)
-        
+
+    # Python path: vectorised multistage density
     result_np = get_multistage_densities(rt_array, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, T, np.array([[1], [x0]]))
     result_np = result_np[0][1]
-    
-    print(-np.log(result_np))
-    print(-np.log(result_cy))
 
     assert np.allclose(result_cy, result_np, atol=1e-10)
-    
-test_multi_stage_fptd()

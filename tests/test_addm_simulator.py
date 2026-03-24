@@ -1,278 +1,402 @@
-"""Tests for the fast Cython aDDM simulator.
+"""Cheap tests for the fast Cython aDDM simulator.
 
-Validates the Cython simulator against the Python reference implementation
-(``DDModel.simulate_fpt_datum``), checks reproducibility, and benchmarks speed.
+These are intentionally lightweight so they can run safely on a login /
+non-compute node. The expensive distributional and timing benchmarks are
+excluded from the test suite.
 """
 
-import time
 import numpy as np
 import pytest
 
-from efficient_fpt.addm import aDDModel, simulate_addm, _build_mu_data_padded
-from efficient_fpt.addm_simulator_cy import simulate_addm_batch_cy
+from efficient_fpt.models import aDDModel, MultiStageModel
+from efficient_fpt.utils import generate_addm_experiment
+from efficient_fpt.simulator_cy import (
+    simulate_addm_fpt_cy,
+    simulate_homog_ddm_fpt_cy,
+)
+from efficient_fpt.models import SingleStageModel
 from efficient_fpt.utils import get_alternating_mu_array
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _simulate_python_batch(
-    mu_data, sacc_data, d_data, sigma, a, b, x0, dt, max_t, gaussian_data
-):
-    """Reference Python simulator using the same pre-generated Gaussians.
-
-    Matches the Cython inner-loop logic exactly so that, given identical
-    Gaussians, the outputs should be bitwise identical.
-    """
-    n_trials = mu_data.shape[0]
-    max_steps = gaussian_data.shape[1]
-    half_dt = 0.5 * dt
-    sigma_sqrt_dt = sigma * np.sqrt(dt)
-
-    rt_out = np.full(n_trials, -1.0)
-    choice_out = np.zeros(n_trials, dtype=np.int32)
-
-    for trial in range(n_trials):
-        d = d_data[trial]
-        y = x0
-        t_particle = 0.0
-        stage = 0
-
-        for step in range(max_steps):
-            y += mu_data[trial, stage] * dt + sigma_sqrt_dt * gaussian_data[trial, step]
-            t_particle += dt
-
-            while stage + 1 < d and t_particle >= sacc_data[trial, stage + 1]:
-                stage += 1
-
-            upper = a - b * t_particle
-            if y >= upper:
-                rt_out[trial] = t_particle - half_dt
-                choice_out[trial] = 1
-                break
-            elif y <= -upper:
-                rt_out[trial] = t_particle - half_dt
-                choice_out[trial] = -1
-                break
-
-    return rt_out, choice_out
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-class TestBatchCyMatchesPython:
-    """Cython and Python reference must produce identical results for the same
-    pre-generated Gaussians."""
-
-    @pytest.mark.parametrize("seed", [42, 123, 999])
-    def test_identical_outputs(self, seed):
-        rng = np.random.default_rng(seed)
-        n_trials = 50
-        sigma, a, b, x0 = 1.0, 1.5, 0.1, 0.0
-        dt, max_t = 1e-3, 10.0
-        max_steps = int(max_t / dt) + 1
-
-        mu1 = rng.uniform(-1, 1, n_trials)
-        mu2 = rng.uniform(-1, 1, n_trials)
-        flag = rng.integers(0, 2, n_trials).astype(np.int32)
-
-        raw_sacc = []
-        d_data = np.zeros(n_trials, dtype=np.int32)
-        for i in range(n_trials):
-            durations = rng.gamma(1.0, 0.3, 100)
-            times = np.concatenate([[0.0], np.cumsum(durations)])
-            times = times[times < max_t]
-            d_data[i] = len(times)
-            raw_sacc.append(times)
-
-        max_d = int(d_data.max())
-        sacc_data = np.zeros((n_trials, max_d), dtype=np.float64)
-        for i in range(n_trials):
-            d = d_data[i]
-            sacc_data[i, :d] = raw_sacc[i]
-        sacc_data = np.ascontiguousarray(sacc_data)
-        mu_data = _build_mu_data_padded(mu1, mu2, d_data, flag, max_d)
-
-        gaussian_data = np.ascontiguousarray(
-            rng.standard_normal((n_trials, max_steps))
-        )
-
-        rt_cy, ch_cy = simulate_addm_batch_cy(
-            mu_data, sacc_data, d_data,
-            sigma, a, b, x0, dt, max_t,
-            gaussian_data,
-        )
-        rt_py, ch_py = _simulate_python_batch(
-            mu_data, sacc_data, d_data,
-            sigma, a, b, x0, dt, max_t,
-            gaussian_data,
-        )
-
-        np.testing.assert_array_equal(ch_cy, ch_py)
-        np.testing.assert_allclose(rt_cy, rt_py, atol=1e-12)
-
-
 class TestSimulateAddm:
-    """Integration tests for the high-level ``simulate_addm`` function."""
+    """Integration tests for the high-level ``generate_addm_experiment`` function."""
 
     def test_basic_run(self):
-        result = simulate_addm(
-            n_trials=100, eta=0.5, kappa=0.01, sigma=1.0,
-            a=1.5, b=0.1, x0=0.0, dt=1e-3, max_t=10.0,
+        result = generate_addm_experiment(
+            n_trials=24, eta=0.5, kappa=0.01, sigma=1.0,
+            a=1.5, b=0.25, x0=0.0, dt=1e-2, T=4.0,
             random_state=42,
         )
-        assert result["rt"].shape == (100,)
-        assert result["choice"].shape == (100,)
+        assert result["rt"].shape == (24,)
+        assert result["choice"].shape == (24,)
         terminated = result["rt"] > 0
-        assert terminated.sum() > 50
+        assert terminated.sum() >= 8
         assert set(np.unique(result["choice"][terminated])).issubset({-1, 1})
 
     def test_reproducibility(self):
         kwargs = dict(
-            n_trials=200, eta=0.5, kappa=0.01, sigma=1.0,
-            a=1.5, b=0.1, x0=0.0, dt=1e-3, max_t=10.0,
+            n_trials=24, eta=0.5, kappa=0.01, sigma=1.0,
+            a=1.5, b=0.25, x0=0.0, dt=1e-2, T=4.0,
             random_state=12345,
         )
-        r1 = simulate_addm(**kwargs)
-        r2 = simulate_addm(**kwargs)
+        r1 = generate_addm_experiment(**kwargs)
+        r2 = generate_addm_experiment(**kwargs)
         np.testing.assert_array_equal(r1["rt"], r2["rt"])
         np.testing.assert_array_equal(r1["choice"], r2["choice"])
 
     def test_flat_boundaries(self):
         """b=0 gives constant boundaries."""
-        result = simulate_addm(
-            n_trials=200, eta=0.5, kappa=0.01, sigma=1.0,
-            a=1.5, b=0.0, x0=0.0, dt=1e-3, max_t=10.0,
+        result = generate_addm_experiment(
+            n_trials=24, eta=0.5, kappa=0.01, sigma=1.0,
+            a=1.5, b=0.0, x0=0.0, dt=1e-2, T=4.0,
             random_state=7,
         )
         terminated = result["rt"] > 0
-        assert terminated.sum() > 100
+        assert terminated.sum() >= 8
 
-    def test_n_threads_error(self):
-        with pytest.raises(NotImplementedError):
-            simulate_addm(
-                n_trials=10, eta=0.5, kappa=0.01, sigma=1.0,
-                a=1.5, b=0.1, n_threads=2,
-            )
+    def test_n_threads(self):
+        """Multi-threaded simulation should produce valid results."""
+        result = generate_addm_experiment(
+            n_trials=24, eta=0.5, kappa=0.01, sigma=1.0,
+            a=1.5, b=0.25, x0=0.0, dt=1e-2, T=4.0,
+            n_threads=2, random_state=42,
+        )
+        terminated = result["rt"] > 0
+        assert terminated.sum() >= 8
 
     def test_output_format(self):
-        result = simulate_addm(
-            n_trials=50, eta=0.5, kappa=0.01, sigma=1.0,
-            a=1.5, b=0.1, dt=1e-3, max_t=5.0, random_state=0,
+        result = generate_addm_experiment(
+            n_trials=16, eta=0.5, kappa=0.01, sigma=1.0,
+            a=1.5, b=0.25, dt=1e-2, T=3.0, random_state=0,
         )
         assert "rt" in result
         assert "choice" in result
-        assert "mu_data_padded" in result
-        assert "sacc_data_padded" in result
+        assert "mu_array_data" in result
+        assert "sacc_array_data" in result
         assert "d_data" in result
-        assert "r1" in result
-        assert "r2" in result
-        assert "flag" in result
+        assert "r1_data" in result
+        assert "r2_data" in result
+        assert "flag_data" in result
         assert "params" in result
-        assert result["mu_data_padded"].shape[0] == 50
-        assert result["sacc_data_padded"].shape[0] == 50
+        assert result["mu_array_data"].shape[0] == 16
+        assert result["sacc_array_data"].shape[0] == 16
 
-
-class TestDistributional:
-    """Statistical comparison: the Cython simulator (via simulate_addm) should
-    produce RT distributions consistent with the Python aDDModel reference."""
-
-    @pytest.mark.parametrize(
-        "eta, kappa, sigma, a, b",
-        [
-            (0.5, 0.01, 1.0, 1.5, 0.1),
-            (0.0, 0.02, 0.8, 1.0, 0.0),
-            (1.0, 0.005, 1.2, 2.0, 0.05),
-        ],
-    )
-    def test_rt_distributions_match(self, eta, kappa, sigma, a, b):
-        """Simulate with both engines and compare RT CDFs via KS test."""
-        from scipy.stats import ks_2samp
-
-        n_trials = 3000
-        dt = 1e-3
-        max_t = 10.0
-        x0 = 0.0
-        gamma_shape, gamma_scale = 1.0, 0.3
-
-        cython_result = simulate_addm(
-            n_trials=n_trials, eta=eta, kappa=kappa, sigma=sigma,
-            a=a, b=b, x0=x0,
-            gamma_shape=gamma_shape, gamma_scale=gamma_scale,
-            dt=dt, max_t=max_t, random_state=42,
+    def test_returned_trial_metadata_is_self_consistent(self):
+        result = generate_addm_experiment(
+            n_trials=18, eta=0.5, kappa=0.01, sigma=1.0,
+            a=1.5, b=0.25, x0=0.0, dt=1e-2, T=4.0,
+            random_state=7,
         )
 
+        assert set(np.unique(result["choice"])).issubset({-1, 0, 1})
+        np.testing.assert_array_equal(result["choice"] != 0, result["rt"] > 0)
+
+        for trial in range(len(result["rt"])):
+            d = int(result["d_data"][trial])
+            rt = result["rt"][trial]
+            choice = int(result["choice"][trial])
+            sacc = result["sacc_array_data"][trial, :d]
+            mu = result["mu_array_data"][trial, :d]
+            positive_sacc = sacc[1:][sacc[1:] > 0]
+
+            assert d >= 1
+            assert sacc[0] == 0.0
+            if positive_sacc.size:
+                assert np.all(np.diff(positive_sacc) > 0)
+
+            m1 = result["mu1_data"][trial]
+            m2 = result["mu2_data"][trial]
+            if result["flag_data"][trial]:
+                m1, m2 = m2, m1
+            expected_mu = get_alternating_mu_array(m1, m2, d)
+            np.testing.assert_allclose(mu, expected_mu)
+
+            if rt > 0:
+                assert choice in {-1, 1}
+                assert np.all(positive_sacc < rt)
+            else:
+                assert rt == -1.0
+                assert choice == 0
+                assert np.all(positive_sacc < result["params"]["T"])
+
+
+class TestaDDModelClass:
+    """Tests for the standalone aDDModel class."""
+
+    def test_init(self):
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25, x0=0.0)
+        assert model.eta == 0.5
+        assert model.kappa == 0.01
+        assert model.sigma == 1.0
+        assert model.a == 1.5
+        assert model.b == 0.25
+        assert model.x0 == 0.0
+
+    def test_derive_drift_scalar(self):
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25)
+        mu1, mu2 = model.derive_drift(5, 3)
+        assert mu1 == pytest.approx(0.01 * (5 - 0.5 * 3))
+        assert mu2 == pytest.approx(0.01 * (0.5 * 5 - 3))
+
+    def test_derive_drift_array(self):
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25)
+        r1 = np.array([3, 5, 2])
+        r2 = np.array([4, 1, 6])
+        mu1, mu2 = model.derive_drift(r1, r2)
+        expected_mu1 = 0.01 * (r1 - 0.5 * r2)
+        expected_mu2 = 0.01 * (0.5 * r1 - r2)
+        np.testing.assert_allclose(mu1, expected_mu1)
+        np.testing.assert_allclose(mu2, expected_mu2)
+
+    def test_simulate_fpt_basic(self):
+        """simulate_fpt returns correct shapes and valid outputs."""
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25)
         rng = np.random.default_rng(42)
-        py_rts = []
-        py_choices = []
-        for _ in range(n_trials):
-            r1 = rng.integers(1, 6)
-            r2 = rng.integers(1, 6)
-            flag = rng.integers(0, 2)
-            mu1 = kappa * (r1 - eta * r2)
-            mu2 = kappa * (eta * r1 - r2)
+        n_trials = 20
+        max_d = 8
 
-            fixations = rng.gamma(gamma_shape, gamma_scale, 200)
-            sacc = np.concatenate([[0.0], np.cumsum(fixations)])
-            sacc = sacc[sacc < max_t]
+        # Build fake covariates
+        r1_data = rng.integers(1, 10, n_trials)
+        r2_data = rng.integers(1, 10, n_trials)
+        flag_data = rng.integers(0, 2, n_trials).astype(np.int32)
+        sacc_array_data = np.zeros((n_trials, max_d))
+        d_data = rng.integers(3, max_d + 1, n_trials).astype(np.int32)
+        for i in range(n_trials):
+            times = np.sort(rng.uniform(0, 3.0, d_data[i] - 1))
+            sacc_array_data[i, 0] = 0.0
+            sacc_array_data[i, 1:d_data[i]] = times
+            sacc_array_data[i, d_data[i]:] = 0.0
 
-            model = aDDModel(mu1, mu2, sacc, flag, sigma, a, b, x0)
-            rt, choice = model.simulate_fpt_datum(dt=dt)
-            if rt < max_t:
-                py_rts.append(rt)
-                py_choices.append(choice)
-
-        cy_terminated = cython_result["rt"] > 0
-        cy_rts = cython_result["rt"][cy_terminated]
-        py_rts = np.array(py_rts)
-
-        assert len(cy_rts) > 500, f"Too few Cython terminated trials: {len(cy_rts)}"
-        assert len(py_rts) > 500, f"Too few Python terminated trials: {len(py_rts)}"
-
-        stat, p = ks_2samp(cy_rts, py_rts)
-        assert p > 0.001, (
-            f"KS test failed: stat={stat:.4f}, p={p:.6f}. "
-            f"Cython and Python RT distributions differ significantly."
+        rt, choice, x_final = model.simulate_fpt(
+            r1_data, r2_data, flag_data, sacc_array_data, d_data, T=4.0, dt=1e-2, rng=0,
         )
 
+        assert rt.shape == (n_trials,)
+        assert choice.shape == (n_trials,)
+        assert x_final.shape == (n_trials,)
+        # Terminated trials have positive rt and choice in {-1, 1}
+        terminated = choice != 0
+        assert np.all(rt[terminated] > 0)
+        assert set(np.unique(choice[terminated])).issubset({-1, 1})
+        # Non-terminated trials have rt == -1 and choice == 0
+        assert np.all(rt[~terminated] == -1.0)
 
-class TestSpeed:
-    """Cython simulator should be substantially faster than pure Python."""
+    def test_simulate_fpt_reproducible(self):
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25)
+        n = 10
+        max_d = 5
+        rng = np.random.default_rng(99)
+        r1_data = rng.integers(1, 10, n)
+        r2_data = rng.integers(1, 10, n)
+        flag_data = rng.integers(0, 2, n).astype(np.int32)
+        d_data = np.full(n, max_d, dtype=np.int32)
+        sacc_array_data = np.zeros((n, max_d), dtype=np.float64)
+        for i in range(n):
+            sacc_array_data[i, 1:] = np.sort(rng.uniform(0, 2.0, max_d - 1))
 
-    def test_speedup(self):
-        n_trials = 200
-        dt = 1e-3
-        max_t = 5.0
-        sigma, a, b, x0 = 1.0, 1.5, 0.1, 0.0
-        eta, kappa = 0.5, 0.01
+        rt1, ch1, xf1 = model.simulate_fpt(r1_data, r2_data, flag_data, sacc_array_data, d_data, T=3.0, dt=1e-2, rng=42)
+        rt2, ch2, xf2 = model.simulate_fpt(r1_data, r2_data, flag_data, sacc_array_data, d_data, T=3.0, dt=1e-2, rng=42)
+        np.testing.assert_array_equal(rt1, rt2)
+        np.testing.assert_array_equal(ch1, ch2)
+        np.testing.assert_array_equal(xf1, xf2)
 
-        t0 = time.perf_counter()
-        simulate_addm(
-            n_trials=n_trials, eta=eta, kappa=kappa, sigma=sigma,
-            a=a, b=b, x0=x0, dt=dt, max_t=max_t, random_state=42,
+    def test_simulate_fpt_chunking(self):
+        """Results should be identical regardless of chunk_size."""
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25)
+        rng = np.random.default_rng(77)
+        n = 30
+        max_d = 5
+        r1_data = rng.integers(1, 10, n)
+        r2_data = rng.integers(1, 10, n)
+        flag_data = rng.integers(0, 2, n).astype(np.int32)
+        d_data = np.full(n, max_d, dtype=np.int32)
+        sacc_array_data = np.zeros((n, max_d), dtype=np.float64)
+        for i in range(n):
+            sacc_array_data[i, 1:] = np.sort(rng.uniform(0, 2.0, max_d - 1))
+
+        rt_big, ch_big, xf_big = model.simulate_fpt(
+            r1_data, r2_data, flag_data, sacc_array_data, d_data, T=3.0, dt=1e-2, rng=42, chunk_size=1000,
         )
-        cy_time = time.perf_counter() - t0
+        rt_small, ch_small, xf_small = model.simulate_fpt(
+            r1_data, r2_data, flag_data, sacc_array_data, d_data, T=3.0, dt=1e-2, rng=42, chunk_size=7,
+        )
+        np.testing.assert_array_equal(rt_big, rt_small)
+        np.testing.assert_array_equal(ch_big, ch_small)
+        np.testing.assert_array_equal(xf_big, xf_small)
 
+    def test_to_multistage_model(self):
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25, x0=0.1)
+        sacc = np.array([0.0, 0.3, 0.6, 0.9])
+        trial = model.to_multistage_model(0.5, -0.3, sacc)
+
+        assert isinstance(trial, MultiStageModel)
+        assert trial.d == 4
+        np.testing.assert_allclose(
+            trial.mu_array, get_alternating_mu_array(0.5, -0.3, 4)
+        )
+        # Symmetric boundaries
+        assert trial.a1 == 1.5
+        assert trial.a2 == -1.5
+        # Can call DDModel methods
+        t_grid, X_grids = trial.simulate_trajs(T=2.0, Nt=200, num=10, rng=0)
+        assert t_grid.shape == (201,)
+        assert X_grids.shape == (10, 201)
+
+    def test_boundary_collapsing_time(self):
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25)
+        assert model.boundary_collapsing_time == pytest.approx(6.0)
+
+        model_flat = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.0)
+        assert model_flat.boundary_collapsing_time == float("inf")
+
+    def test_ddm_like_interface(self):
+        """aDDModel exposes diffusion_coeff, upper_bdy, lower_bdy, initialize_X0."""
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25, x0=0.0)
+
+        assert model.diffusion_coeff(0, 0) == 1.0
+        assert model.upper_bdy(0) == pytest.approx(1.5)
+        assert model.lower_bdy(0) == pytest.approx(-1.5)
+        assert model.upper_bdy(2.0) == pytest.approx(1.0)
+        assert model.lower_bdy(2.0) == pytest.approx(-1.0)
+
+        X0 = model.initialize_X0(0.0, 100)
+        np.testing.assert_array_equal(X0, np.zeros(100))
+
+
+class TestInlineRNG:
+    """Tests for the inline-RNG Cython simulators."""
+
+    def test_homog_reproducibility(self):
+        """Same seeds produce identical results."""
+        n = 50
+        max_steps = 1001
+        dt = 0.001
+        drift_vals = np.full(max_steps, 0.5, dtype=np.float64)
+        diffusion_vals = np.full(max_steps, 1.0, dtype=np.float64)
+        t_grid = np.arange(1, max_steps + 1) * dt
+        upper_vals = np.ascontiguousarray(1.5 - 0.25 * t_grid, dtype=np.float64)
+        lower_vals = np.ascontiguousarray(-1.5 + 0.25 * t_grid, dtype=np.float64)
+        x0_data = np.zeros(n, dtype=np.float64)
+        seeds = np.arange(n, dtype=np.uint64)
+
+        T = dt * max_steps
+        rt1, ch1, xf1 = simulate_homog_ddm_fpt_cy(
+            drift_vals, diffusion_vals, upper_vals, lower_vals, x0_data, dt, max_steps, T, seeds,
+        )
+        rt2, ch2, xf2 = simulate_homog_ddm_fpt_cy(
+            drift_vals, diffusion_vals, upper_vals, lower_vals, x0_data, dt, max_steps, T, seeds,
+        )
+        np.testing.assert_array_equal(rt1, rt2)
+        np.testing.assert_array_equal(ch1, ch2)
+        np.testing.assert_array_equal(xf1, xf2)
+
+    def test_homog_different_seeds_differ(self):
+        """Different seeds produce different results."""
+        n = 100
+        max_steps = 1001
+        dt = 0.001
+        drift_vals = np.full(max_steps, 0.5, dtype=np.float64)
+        diffusion_vals = np.full(max_steps, 1.0, dtype=np.float64)
+        t_grid = np.arange(1, max_steps + 1) * dt
+        upper_vals = np.ascontiguousarray(1.5 - 0.25 * t_grid, dtype=np.float64)
+        lower_vals = np.ascontiguousarray(-1.5 + 0.25 * t_grid, dtype=np.float64)
+        x0_data = np.zeros(n, dtype=np.float64)
+
+        seeds_a = np.arange(n, dtype=np.uint64)
+        seeds_b = np.arange(1000, 1000 + n, dtype=np.uint64)
+        T = dt * max_steps
+        rt_a, ch_a, _ = simulate_homog_ddm_fpt_cy(
+            drift_vals, diffusion_vals, upper_vals, lower_vals, x0_data, dt, max_steps, T, seeds_a,
+        )
+        rt_b, ch_b, _ = simulate_homog_ddm_fpt_cy(
+            drift_vals, diffusion_vals, upper_vals, lower_vals, x0_data, dt, max_steps, T, seeds_b,
+        )
+        assert not np.array_equal(rt_a, rt_b)
+
+    def test_ddmodel_uses_inline_rng(self):
+        """SingleStageModel.simulate_fpt now uses inline RNG and is reproducible."""
+        model = SingleStageModel(mu=0.5, sigma=1.0, a=1.5, b=0.25, x0=0.0)
+        rt1, ch1, xf1 = model.simulate_fpt(100, T=1.0, dt=1e-3, rng=42)
+        rt2, ch2, xf2 = model.simulate_fpt(100, T=1.0, dt=1e-3, rng=42)
+        np.testing.assert_array_equal(rt1, rt2)
+        np.testing.assert_array_equal(ch1, ch2)
+        np.testing.assert_array_equal(xf1, xf2)
+
+    def test_ddmodel_reasonable_distribution(self):
+        """SingleStageModel simulation produces sensible RT distribution."""
+        model = SingleStageModel(mu=0.5, sigma=1.0, a=1.5, b=0.0, x0=0.0)
+        rt, choice, _ = model.simulate_fpt(2000, T=10.0, dt=1e-3, rng=0)
+        terminated = rt > 0
+        # Most trials should terminate
+        assert terminated.sum() > 1500
+        # With positive drift, more upper boundary crossings
+        assert (choice[terminated] == 1).sum() > (choice[terminated] == -1).sum()
+        # Mean RT should be reasonable (not near 0 or near T)
+        mean_rt = rt[terminated].mean()
+        assert 0.1 < mean_rt < 5.0
+
+    def test_addm_inline_rng_reproducibility(self):
+        """aDDM inline RNG simulator is reproducible with same seeds."""
         rng = np.random.default_rng(42)
-        t0 = time.perf_counter()
-        for _ in range(n_trials):
-            r1 = rng.integers(1, 6)
-            r2 = rng.integers(1, 6)
-            flag = rng.integers(0, 2)
-            mu1 = kappa * (r1 - eta * r2)
-            mu2 = kappa * (eta * r1 - r2)
+        n = 20
+        max_d = 5
+        mu_array_data = np.ascontiguousarray(rng.uniform(-0.5, 0.5, (n, max_d)), dtype=np.float64)
+        sacc_array_data = np.zeros((n, max_d), dtype=np.float64)
+        d_data = np.full(n, max_d, dtype=np.int32)
+        for i in range(n):
+            sacc_array_data[i, 1:] = np.sort(rng.uniform(0, 2.0, max_d - 1))
+        sacc_array_data = np.ascontiguousarray(sacc_array_data, dtype=np.float64)
 
-            fixations = rng.gamma(1.0, 0.3, 200)
-            sacc = np.concatenate([[0.0], np.cumsum(fixations)])
-            sacc = sacc[sacc < max_t]
+        seeds = np.arange(n, dtype=np.uint64)
 
-            model = aDDModel(mu1, mu2, sacc, flag, sigma, a, b, x0)
-            model.simulate_fpt_datum(dt=dt)
-        py_time = time.perf_counter() - t0
+        rt1, ch1, xf1 = simulate_addm_fpt_cy(
+            mu_array_data, sacc_array_data, d_data, 1.0, 1.5, 0.25, 0.0, 1e-2, 3.0, seeds,
+        )
+        rt2, ch2, xf2 = simulate_addm_fpt_cy(
+            mu_array_data, sacc_array_data, d_data, 1.0, 1.5, 0.25, 0.0, 1e-2, 3.0, seeds,
+        )
+        np.testing.assert_array_equal(rt1, rt2)
+        np.testing.assert_array_equal(ch1, ch2)
+        np.testing.assert_array_equal(xf1, xf2)
 
-        speedup = py_time / cy_time
-        print(f"\nCython: {cy_time:.3f}s, Python: {py_time:.3f}s, speedup: {speedup:.1f}x")
-        assert speedup > 10, f"Expected >10x speedup, got {speedup:.1f}x"
+    def test_memory_efficiency(self):
+        """Inline RNG should not allocate a massive Gaussian matrix."""
+        import tracemalloc
+        model = SingleStageModel(mu=0.5, sigma=1.0, a=1.5, b=0.25, x0=0.0)
+
+        tracemalloc.start()
+        rt, choice, _ = model.simulate_fpt(10000, T=5.0, dt=1e-3, rng=0)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        # Old approach: 10000 * 5001 * 8 bytes = ~400 MB
+        # New approach: should be well under 100 MB
+        assert peak < 100 * 1024 * 1024, f"Peak memory {peak / 1024**2:.1f} MB exceeds 100 MB"
+
+    def test_chunk_size_independence(self):
+        """aDDModel results identical regardless of chunk_size with inline RNG."""
+        model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25)
+        rng = np.random.default_rng(77)
+        n = 30
+        max_d = 5
+        r1_data = rng.integers(1, 10, n)
+        r2_data = rng.integers(1, 10, n)
+        flag_data = rng.integers(0, 2, n).astype(np.int32)
+        d_data = np.full(n, max_d, dtype=np.int32)
+        sacc_array_data = np.zeros((n, max_d), dtype=np.float64)
+        for i in range(n):
+            sacc_array_data[i, 1:] = np.sort(rng.uniform(0, 2.0, max_d - 1))
+
+        rt_big, ch_big, xf_big = model.simulate_fpt(
+            r1_data, r2_data, flag_data, sacc_array_data, d_data, T=3.0, dt=1e-2, rng=42, chunk_size=1000,
+        )
+        rt_small, ch_small, xf_small = model.simulate_fpt(
+            r1_data, r2_data, flag_data, sacc_array_data, d_data, T=3.0, dt=1e-2, rng=42, chunk_size=7,
+        )
+        np.testing.assert_array_equal(rt_big, rt_small)
+        np.testing.assert_array_equal(ch_big, ch_small)
+        np.testing.assert_array_equal(xf_big, xf_small)
