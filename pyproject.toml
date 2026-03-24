@@ -11,14 +11,20 @@ authors = [
 ]
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+examples = ["scipy", "matplotlib", "jupyter"]
+
 [project.urls]
 Homepage = "https://github.com/RiverFlowsInYou98/efficient-fpt"
 Repository = "https://github.com/RiverFlowsInYou98/efficient-fpt"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

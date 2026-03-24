@@ -28,17 +28,15 @@ extensions = [
         extra_link_args=omp_link_args,
     ),
     Extension(
-        "efficient_fpt.addm_simulator_cy",  # no OpenMP
-        sources=["src/efficient_fpt/addm_simulator_cy.pyx"],
+        "efficient_fpt.simulator_cy",  # with OpenMP
+        sources=["src/efficient_fpt/simulator_cy.pyx"],
         include_dirs=[numpy.get_include()],
-        extra_compile_args=base_compile_args,
+        extra_compile_args=base_compile_args + omp_compile_args,
+        extra_link_args=omp_link_args,
     ),
 ]
 
 setup(
-    name="efficient_fpt",
-    version="0.1",
-    packages=["efficient_fpt"],
     ext_modules=cythonize(
         extensions,
         compiler_directives={
