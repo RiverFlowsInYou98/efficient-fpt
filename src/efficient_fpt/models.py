@@ -1,17 +1,18 @@
 import numpy as np
 from abc import ABC, abstractmethod
 from numbers import Number
-from .utils import check_valid_multistage_params, get_alternating_mu_array, build_mu_array_data
-
-
-_DEFAULT_CHUNK_SIZE = 200
-
-
-def _swap_and_build_mu(mu1_data, mu2_data, flag_data, d_data, max_d):
-    """Swap mu1/mu2 based on fixation flag and build the padded drift array."""
-    mu1_eff = np.where(flag_data == 0, mu1_data, mu2_data).astype(np.float64)
-    mu2_eff = np.where(flag_data == 0, mu2_data, mu1_data).astype(np.float64)
-    return build_mu_array_data(mu1_eff, mu2_eff, d_data, max_d)
+from .addm_helpers import (
+    _build_alternating_mu_array,
+    _build_addm_mu_array_data,
+)
+from .validation import check_multistage_params
+from .validation import check_addm_params, check_single_stage_params
+from ._defaults import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_QUADRATURE_ORDER,
+    DEFAULT_TRUNC_NUM,
+    DEFAULT_THRESHOLD,
+)
 
 
 def _initialize_x0(x0, lower_bdy_t0, upper_bdy_t0, num, rng=None):
@@ -19,8 +20,12 @@ def _initialize_x0(x0, lower_bdy_t0, upper_bdy_t0, num, rng=None):
 
     Used by both :class:`DDModel` and :class:`aDDModel`.
     """
-    rng = np.random.default_rng() if rng is None else (
-        rng if isinstance(rng, np.random.Generator) else np.random.default_rng(rng)
+    rng = (
+        np.random.default_rng()
+        if rng is None
+        else (
+            rng if isinstance(rng, np.random.Generator) else np.random.default_rng(rng)
+        )
     )
     if isinstance(x0, Number):
         return x0 * np.ones(num)
@@ -105,8 +110,7 @@ class DDModel(ABC):
     def simulate_trajs(self, T, Nt=1000, num=1000, rng=None):
         """Simulate multiple trajectories of the drift-diffusion model.
 
-        Intended for visualisation — returns full sample paths, not just
-        first-passage information.
+        Intended for visualisation — returns full sample paths.
 
         Parameters
         ----------
@@ -189,27 +193,35 @@ class DDModel(ABC):
 
     def _simulate_fpt_cython(self, num, T, dt, rng, n_threads=1):
         """Cython fast path for models with time-only drift/diffusion."""
-        from .simulator_cy import simulate_homog_ddm_fpt_cy
+        from .cython.simulator import simulate_homog_ddm_fpt
 
-        x0_data = np.ascontiguousarray(self.initialize_X0(0.0, num, rng=rng), dtype=np.float64)
+        x0_data = np.ascontiguousarray(
+            self.initialize_X0(0.0, num, rng=rng), dtype=np.float64
+        )
         if T <= 0:
             rt = np.full(num, -1.0, dtype=np.float64)
             choice = np.zeros(num, dtype=np.int32)
             return rt, choice, x0_data
 
         max_steps = int(np.ceil(T / dt))
-        t_end = np.minimum(
-            (np.arange(max_steps, dtype=np.float64) + 1.0) * dt, T
-        )
+        t_end = np.minimum((np.arange(max_steps, dtype=np.float64) + 1.0) * dt, T)
         t_start = np.empty_like(t_end)
         t_start[0] = 0.0
         t_start[1:] = t_end[:-1]
 
         # Ensure (max_steps,) even when drift_coeff/diffusion_coeff return scalars
         drift_raw = self.drift_coeff(0, t_start)
-        drift_vals = np.full(max_steps, drift_raw, dtype=np.float64) if np.ndim(drift_raw) == 0 else np.ascontiguousarray(drift_raw, dtype=np.float64)
+        drift_vals = (
+            np.full(max_steps, drift_raw, dtype=np.float64)
+            if np.ndim(drift_raw) == 0
+            else np.ascontiguousarray(drift_raw, dtype=np.float64)
+        )
         diff_raw = self.diffusion_coeff(0, t_start)
-        diffusion_vals = np.full(max_steps, diff_raw, dtype=np.float64) if np.ndim(diff_raw) == 0 else np.ascontiguousarray(diff_raw, dtype=np.float64)
+        diffusion_vals = (
+            np.full(max_steps, diff_raw, dtype=np.float64)
+            if np.ndim(diff_raw) == 0
+            else np.ascontiguousarray(diff_raw, dtype=np.float64)
+        )
         upper_vals = np.ascontiguousarray(self.upper_bdy(t_end), dtype=np.float64)
         lower_vals = np.ascontiguousarray(self.lower_bdy(t_end), dtype=np.float64)
 
@@ -217,7 +229,7 @@ class DDModel(ABC):
             rng.integers(0, 2**63, size=num, dtype=np.uint64)
         )
 
-        return simulate_homog_ddm_fpt_cy(
+        return simulate_homog_ddm_fpt(
             drift_vals,
             diffusion_vals,
             upper_vals,
@@ -279,11 +291,12 @@ class DDModel(ABC):
 
 class SingleStageModel(DDModel):
     """
-    Subclass for the angle model with a constant drift and symmetric linear collapsing boundaries.
+    Subclass for the "angle" model with a constant drift and symmetric linear collapsing boundaries.
     """
 
     def __init__(self, mu, sigma, a, b, x0):
         super().__init__(x0)
+        check_single_stage_params(mu, sigma, a, b, x0)
         self.mu = mu
         self.sigma = sigma
         self.a = a
@@ -310,27 +323,35 @@ class MultiStageModel(DDModel):
     """
     Subclass for multi-stage model of homogeneous trials,
     where the drift and diffusion are piecewise constant, and the boundaries are piecewise linear.
-    The j-th (0<=j<=d-2) stage corresponds to sacc_array[j] <= t <= sacc_array[j+1],
-    The (d-1)-th (last) stage corresponds to t >= sacc_array[d-1].
+    The j-th (0<=j<=d-2) stage corresponds to node_array[j] <= t <= node_array[j+1],
+    The (d-1)-th (last) stage corresponds to t >= node_array[d-1].
     In the j-th (0<=j<=d-1) stage,
     the model has drift mu_array[j] and diffusion sigma_array[j],
     the upper boundary has intercept ub[j] and slope b1_array[j].
     the lower boundary has intercept lb[j] and slope b2_array[j].
 
-    mu_array, sacc_array, sigma_array, b1_array, b2_array MUST have the same length d.
+    mu_array, node_array, sigma_array, b1_array, b2_array MUST have the same length d.
     """
 
     def __init__(
-        self, mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array, x0
+        self, mu_array, node_array, sigma_array, a1, b1_array, a2, b2_array, x0
     ):
         super().__init__(x0)
-        check_valid_multistage_params(
-            mu_array, sacc_array, sigma_array, a1, b1_array, a2, b2_array
+        check_multistage_params(
+            mu_array,
+            node_array,
+            sigma_array,
+            a1,
+            b1_array,
+            a2,
+            b2_array,
+            x0=x0,
+            allow_infinite_boundaries=True,
         )
         d = len(mu_array)
         self.d = d
         self.mu_array = mu_array
-        self.sacc_array = sacc_array
+        self.node_array = node_array
         self.sigma_array = sigma_array
         self.a1 = a1
         self.b1_array = b1_array
@@ -343,26 +364,26 @@ class MultiStageModel(DDModel):
         self.ub_array[0] = ub
         self.lb_array[0] = lb
         for i in range(1, d):
-            ub += b1_array[i - 1] * (sacc_array[i] - sacc_array[i - 1])
-            lb += b2_array[i - 1] * (sacc_array[i] - sacc_array[i - 1])
+            ub += b1_array[i - 1] * (node_array[i] - node_array[i - 1])
+            lb += b2_array[i - 1] * (node_array[i] - node_array[i - 1])
             self.ub_array[i] = ub
             self.lb_array[i] = lb
 
     def drift_coeff(self, X: float, t: float) -> float:
-        return piecewise_const_func(t, self.mu_array, self.sacc_array)
+        return piecewise_const_func(t, self.mu_array, self.node_array)
 
     def diffusion_coeff(self, X: float, t: float) -> float:
-        return piecewise_const_func(t, self.sigma_array, self.sacc_array)
+        return piecewise_const_func(t, self.sigma_array, self.node_array)
 
     @property
     def is_update_vectorizable(self) -> bool:
         return True
 
     def upper_bdy(self, t):
-        return piecewise_linear_func(t, self.ub_array, self.b1_array, self.sacc_array)
+        return piecewise_linear_func(t, self.ub_array, self.b1_array, self.node_array)
 
     def lower_bdy(self, t):
-        return piecewise_linear_func(t, self.lb_array, self.b2_array, self.sacc_array)
+        return piecewise_linear_func(t, self.lb_array, self.b2_array, self.node_array)
 
 
 class aDDModel:
@@ -389,6 +410,7 @@ class aDDModel:
     """
 
     def __init__(self, eta, kappa, sigma, a, b, x0=0.0):
+        check_addm_params(eta, kappa, sigma, a, b, x0)
         self.eta = eta
         self.kappa = kappa
         self.sigma = sigma
@@ -430,7 +452,10 @@ class aDDModel:
         -------
         mu1, mu2 : same shape as *r1*
             Drift rates for fixating item 1 and item 2 respectively.
+        Note: whether the participant fixates item 1 first or item 2 first is described by the flag_data.
         """
+        r1 = np.asarray(r1, dtype=np.float64)
+        r2 = np.asarray(r2, dtype=np.float64)
         mu1 = self.kappa * (r1 - self.eta * r2)
         mu2 = self.kappa * (self.eta * r1 - r2)
         return mu1, mu2
@@ -445,7 +470,7 @@ class aDDModel:
         T,
         dt=1e-4,
         rng=None,
-        chunk_size=_DEFAULT_CHUNK_SIZE,
+        chunk_size=DEFAULT_CHUNK_SIZE,
         n_threads=1,
     ):
         """Simulate first-passage times for heterogeneous aDDM trials.
@@ -484,7 +509,7 @@ class aDDModel:
         x_final : ndarray (n_trials,) float64
             Final particle position at the time of crossing or at the last step.
         """
-        from .simulator_cy import simulate_addm_fpt_cy
+        from .cython.simulator import _simulate_addm_fpt
 
         if dt <= 0:
             raise ValueError("dt must be positive")
@@ -492,22 +517,30 @@ class aDDModel:
         n_trials = len(d_data)
         max_d = sacc_array_data.shape[1]
 
-        # Derive drifts from stimulus ratings and build mu array
-        mu1_data, mu2_data = self.derive_drift(
-            np.asarray(r1_data, dtype=np.float64),
-            np.asarray(r2_data, dtype=np.float64),
+        # Build mu array from ADDM covariates
+        mu_array_data = _build_addm_mu_array_data(
+            self.eta,
+            self.kappa,
+            r1_data,
+            r2_data,
+            flag_data,
+            d_data,
+            max_d,
         )
-        mu_array_data = _swap_and_build_mu(mu1_data, mu2_data, flag_data, d_data, max_d)
 
         sacc_array_data = np.ascontiguousarray(sacc_array_data, dtype=np.float64)
         d_data = np.ascontiguousarray(d_data, dtype=np.int32)
+
+        # Sample per-trial x0 (supports scalar and distribution x0)
+        x0_data = np.ascontiguousarray(
+            self.initialize_X0(0.0, n_trials, rng=rng), dtype=np.float64
+        )
 
         budget_time = min(self.a / self.b, T) if self.b > 0 else T
         if budget_time <= 0:
             rt_all = np.full(n_trials, -1.0, dtype=np.float64)
             choice_all = np.zeros(n_trials, dtype=np.int32)
-            x_final_all = np.full(n_trials, self.x0, dtype=np.float64)
-            return rt_all, choice_all, x_final_all
+            return rt_all, choice_all, x0_data
 
         # Generate all seeds up front for reproducibility across chunk sizes
         trial_seeds = np.ascontiguousarray(
@@ -521,14 +554,14 @@ class aDDModel:
         for start in range(0, n_trials, chunk_size):
             end = min(start + chunk_size, n_trials)
 
-            rt_c, ch_c, xf_c = simulate_addm_fpt_cy(
+            rt_c, ch_c, xf_c = _simulate_addm_fpt(
                 np.ascontiguousarray(mu_array_data[start:end]),
                 np.ascontiguousarray(sacc_array_data[start:end]),
                 np.ascontiguousarray(d_data[start:end]),
                 self.sigma,
                 self.a,
                 self.b,
-                self.x0,
+                np.ascontiguousarray(x0_data[start:end]),
                 dt,
                 budget_time,
                 np.ascontiguousarray(trial_seeds[start:end]),
@@ -543,112 +576,143 @@ class aDDModel:
 
     def fptd(
         self,
-        t,
-        mu_array,
+        rt,
+        choice,
+        r1,
+        r2,
+        flag,
         sacc_array,
-        boundary,
-        order=30,
-        trunc_num=100,
-        threshold=1e-20,
+        d,
+        order=DEFAULT_QUADRATURE_ORDER,
+        trunc_num=DEFAULT_TRUNC_NUM,
+        threshold=DEFAULT_THRESHOLD,
+        log_space=False,
     ):
         """First-passage time density for a single trial configuration.
 
         Parameters
         ----------
-        t : float
+        rt : float
             Time at which to evaluate the density.
-        mu_array : array-like, shape (d,)
-            Drift rate per stage.
+        choice : int
+            +1 for the upper boundary, -1 for the lower boundary.
+        r1, r2 : float
+            Stimulus ratings for the two options.
+        flag : int
+            0 = fixate item 1 first, 1 = fixate item 2 first.
         sacc_array : array-like, shape (d,)
             Saccade onset times.
-        boundary : int
-            +1 (upper) or -1 (lower).
+        d : int
+            Number of valid stages.
         order : int
             Gauss-Legendre quadrature order.
 
         Returns
         -------
         float
-            FPTD value at time *t*.
+            FPTD value at time *rt*.
         """
-        from .multi_stage_cy import get_addm_fptd_cy
+        from .cython.multi_stage import compute_addm_fptd
 
-        mu_array = np.asarray(mu_array, dtype=np.float64)
         sacc_array = np.asarray(sacc_array, dtype=np.float64)
-        d = len(mu_array)
-        return get_addm_fptd_cy(
-            t,
-            d,
-            mu_array,
-            sacc_array,
+        return compute_addm_fptd(
+            rt,
+            choice,
+            self.eta,
+            self.kappa,
             self.sigma,
             self.a,
             self.b,
             self.x0,
-            boundary,
-            trunc_num,
-            threshold,
-            order,
+            r1,
+            r2,
+            flag,
+            sacc_array,
+            d,
+            order=order,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            log_space=log_space,
         )
 
     def mean_neg_log_likelihood(
         self,
-        mu1_data,
-        mu2_data,
         rt_data,
         choice_data,
+        r1_data,
+        r2_data,
+        flag_data,
         sacc_array_data,
         d_data,
-        max_d,
-        threshold=1e-20,
-        num_threads=-1,
-        order=30,
+        order=DEFAULT_QUADRATURE_ORDER,
+        trunc_num=DEFAULT_TRUNC_NUM,
+        threshold=DEFAULT_THRESHOLD,
+        n_threads=-1,
+        log_space=False,
+        warn=True,
     ):
         """Mean negative log-likelihood over observed trials.
 
-        Thin wrapper around ``compute_loss_parallel`` with model parameters
-        filled in from *self*.
+        Derives drift rates from stimulus ratings internally using
+        ``self.eta`` and ``self.kappa``, then swaps mu1/mu2 per trial
+        according to *flag_data* -- consistent with :meth:`simulate_fpt`.
 
         Parameters
         ----------
-        mu1_data, mu2_data : ndarray (n_trials,)
-            Per-trial drift rates (pre-swapped for fixation order).
         rt_data : ndarray (n_trials,)
         choice_data : ndarray (n_trials,) int
+        r1_data, r2_data : ndarray (n_trials,)
+            Stimulus ratings for item 1 and item 2.
+        flag_data : ndarray (n_trials,) int
+            0 = fixate item 1 first, 1 = fixate item 2 first.
         sacc_array_data : ndarray (n_trials, max_d)
         d_data : ndarray (n_trials,) int
-        max_d : int
-        threshold : float
-        num_threads : int
-            -1 for all available threads.
         order : int
             Gauss-Legendre quadrature order.
+        trunc_num : int
+            Series truncation limit.
+        threshold : float
+            Early-stopping threshold for series terms.
+        n_threads : int
+            -1 for all available threads.
+        log_space : bool
+            If True, compute likelihoods in log space internally before
+            returning the mean negative log-likelihood.
+        warn : bool
+            If True, emit warnings for skipped trials with invalid or zero
+            likelihoods.
 
         Returns
         -------
         float
             Mean negative log-likelihood.
         """
-        from .multi_stage_cy import compute_loss_parallel
+        from .cython.batch import compute_addm_nll
 
-        return compute_loss_parallel(
-            mu1_data,
-            mu2_data,
+        return compute_addm_nll(
             rt_data,
             choice_data,
-            sacc_array_data,
-            d_data,
-            max_d,
+            self.eta,
+            self.kappa,
             self.sigma,
             self.a,
             self.b,
             self.x0,
-            threshold,
-            num_threads,
-            order,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            order=order,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            n_threads=n_threads,
+            log_space=log_space,
+            reduce="mean",
+            warn=warn,
         )
 
-    def to_multistage_model(self, mu1, mu2, sacc_array):
+    def to_multistage_model(self, mu1, mu2, node_array):
         """Construct a :class:`MultiStageModel` for a single trial.
 
         Useful for visualisation (``simulate_trajs``), computing densities
@@ -659,22 +723,22 @@ class aDDModel:
         ----------
         mu1, mu2 : float
             Drift rates for item-1 and item-2 fixation stages.
-        sacc_array : array-like
-            Saccade onset times.  ``sacc_array[0]`` should be 0.
+        node_array : array-like
+            Stage onset times.  ``node_array[0]`` should be 0.
 
         Returns
         -------
         MultiStageModel
         """
-        sacc_array = np.asarray(sacc_array, dtype=np.float64)
-        d = len(sacc_array)
-        mu_array = get_alternating_mu_array(mu1, mu2, d)
+        node_array = np.asarray(node_array, dtype=np.float64)
+        d = len(node_array)
+        mu_array = _build_alternating_mu_array(mu1, mu2, d)
         sigma_array = np.full(d, self.sigma)
         b1_array = np.full(d, -self.b)
         b2_array = np.full(d, self.b)
         return MultiStageModel(
             mu_array,
-            sacc_array,
+            node_array,
             sigma_array,
             self.a,
             b1_array,
@@ -683,68 +747,129 @@ class aDDModel:
             self.x0,
         )
 
+    def generate_experiment(
+        self,
+        n_trials,
+        gamma_shape=1.0,
+        gamma_scale=0.3,
+        r_range=(1, 6),
+        dt=1e-4,
+        T=20.0,
+        n_threads=1,
+        random_state=None,
+        chunk_size=None,
+    ):
+        """Simulate *n_trials* of the attentional drift diffusion model.
+
+        Generates random stimulus ratings, fixation sequences, and first-item
+        flags, then runs the Cython Euler-Maruyama simulator.
+
+        Parameters
+        ----------
+        n_trials : int
+            Number of trials to simulate.
+        gamma_shape, gamma_scale : float
+            Parameters of the Gamma distribution for fixation durations.
+        r_range : (int, int)
+            Inclusive range for stimulus ratings (drawn uniformly).
+        dt : float
+            Euler-Maruyama time step.
+        T : float
+            Maximum trial duration (seconds).
+        n_threads : int
+            Number of OpenMP threads for the Cython simulator (1 = serial).
+        random_state : int or None
+            Seed for reproducibility.
+        chunk_size : int or None
+            Trials processed per Cython call (controls peak memory).
+
+        Returns
+        -------
+        dict with keys:
+            rt_data, choice_data, r1_data, r2_data, flag_data,
+            sacc_array_data, d_data, params.
+        """
+        from .addm_helpers import _generate_sacc_array_data
+
+        if chunk_size is None:
+            chunk_size = DEFAULT_CHUNK_SIZE
+
+        rng = np.random.default_rng(random_state)
+
+        # --- Stimulus values ---
+        r1_data = rng.integers(r_range[0], r_range[1] + 1, size=n_trials)
+        r2_data = rng.integers(r_range[0], r_range[1] + 1, size=n_trials)
+
+        # --- Fixation flag (which item first) ---
+        flag_data = rng.integers(0, 2, size=n_trials).astype(np.int32)
+
+        # --- Fixation sequences ---
+        sacc_array_data, d_data, max_d = _generate_sacc_array_data(
+            rng, n_trials, T, gamma_shape, gamma_scale
+        )
+
+        # --- Simulate ---
+        rt_all, choice_all, _ = self.simulate_fpt(
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            T=T,
+            dt=dt,
+            rng=rng,
+            chunk_size=chunk_size,
+            n_threads=n_threads,
+        )
+
+        # --- Post-process: truncate to stages that started before RT ---
+        terminated = rt_all > 0
+        rt_col = rt_all[:, np.newaxis]
+        stage_indices = np.arange(max_d)[np.newaxis, :]
+
+        active_before_rt = (stage_indices < d_data[:, np.newaxis]) & (
+            sacc_array_data < rt_col
+        )
+        d_new = active_before_rt.sum(axis=1).astype(np.int32)
+        d_data = np.where(terminated, np.maximum(d_new, 1), d_data).astype(np.int32)
+
+        beyond_new_d = stage_indices >= d_data[:, np.newaxis]
+        sacc_array_data[beyond_new_d] = 0.0
+        max_d = int(d_data.max())
+        sacc_array_data = sacc_array_data[:, :max_d]
+
+        return {
+            "rt_data": np.ascontiguousarray(rt_all, dtype=np.float64),
+            "choice_data": np.ascontiguousarray(choice_all, dtype=np.int32),
+            "r1_data": np.ascontiguousarray(r1_data),
+            "r2_data": np.ascontiguousarray(r2_data),
+            "flag_data": np.ascontiguousarray(flag_data, dtype=np.int32),
+            "sacc_array_data": np.ascontiguousarray(sacc_array_data, dtype=np.float64),
+            "d_data": np.ascontiguousarray(d_data, dtype=np.int32),
+            "params": {
+                "eta": self.eta,
+                "kappa": self.kappa,
+                "sigma": self.sigma,
+                "a": self.a,
+                "b": self.b,
+                "x0": self.x0,
+                "dt": dt,
+                "T": T,
+                "gamma_shape": gamma_shape,
+                "gamma_scale": gamma_scale,
+                "r_range": r_range,
+            },
+        }
+
     @property
     def boundary_collapsing_time(self):
         """Time at which collapsing boundaries meet (``inf`` if *b* == 0)."""
         return self.a / self.b if self.b > 0 else float("inf")
 
 
-def piecewise_const_func(t, mu_array, sacc_array):
-    """
-    piecewise constant drift rate function, with drift rates `mu_array` and change points `sacc_array`
-    """
-    d = len(mu_array)
-    if len(sacc_array) != d:
-        raise ValueError(f"sacc_array length {len(sacc_array)} != mu_array length {d}")
-    if not all(i < j for i, j in zip(sacc_array, sacc_array[1:])):
-        raise ValueError("sacc_array must be strictly increasing")
-    if d >= 2 and sacc_array[1] <= 0:
-        raise ValueError("sacc_array[1] must be positive")
-    _sacc_array = np.append(sacc_array, np.inf)
-    return np.piecewise(
-        t,
-        [(t >= _sacc_array[i]) & (t < _sacc_array[i + 1]) for i in range(d)],
-        mu_array,
-    )
-
-
-def piecewise_linear_func(t, a_array, b_array, sacc_array):
-    """
-    piecewise linear function, with intercepts `a_array`, slopes `b_array` and change points `sacc_array`
-    """
-    d = len(b_array)
-    if len(a_array) != d:
-        raise ValueError(f"a_array length {len(a_array)} != b_array length {d}")
-    if len(sacc_array) != d:
-        raise ValueError(f"sacc_array length {len(sacc_array)} != b_array length {d}")
-    if not all(i < j for i, j in zip(sacc_array, sacc_array[1:])):
-        raise ValueError("sacc_array must be strictly increasing")
-    if d >= 2 and sacc_array[1] <= 0:
-        raise ValueError("sacc_array[1] must be positive")
-
-    # Extend sacc_array to include boundaries for the piecewise function
-    _sacc_array = np.append(sacc_array, np.inf)
-
-    # Define the piecewise function
-    conds = [(t >= _sacc_array[i]) & (t < _sacc_array[i + 1]) for i in range(d)]
-    funcs = [
-        lambda t, i=i: a_array[i] + b_array[i] * (t - _sacc_array[i]) for i in range(d)
-    ]
-    return np.piecewise(t, conds, funcs)
-
-
-# Weibull survival function (multiplicative)
-def weibull_survival(t=1, lbda=1, k=1):
-    """boundary based on weibull survival function.
-
-    Arguments
-    ---------
-        t (int, optional): Defaults to 1.
-        lbda (int, optional): Defaults to 1.
-        k (int, optional): Defaults to 1.
-
-    Returns
-    -------
-        np.array: Array of boundary values, same length as t
-    """
-    return np.exp(-np.power(np.divide(t, lbda), k))
+# Backward-compatible re-exports from boundaries module
+from .boundaries import (
+    piecewise_const_func,
+    piecewise_linear_func,
+    weibull_survival,
+)  # noqa: F401

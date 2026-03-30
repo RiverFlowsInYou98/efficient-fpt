@@ -3,6 +3,56 @@
 # cython: wraparound=False
 # cython: cdivision=True
 # cython: initializedcheck=False
+"""Euler-Maruyama first-passage-time simulators with inline RNG and OpenMP.
+
+This module provides three public entry points, each targeting a different
+level of model generality:
+
+* **simulate_homog_ddm_fpt** — *Homogeneous* DDM.  All trials share the
+  same precomputed drift, diffusion, and boundary arrays (evaluated on a
+  common time grid).  Only the starting position and PRNG seed vary across
+  trials.  Used by ``DDModel.simulate_fpt`` for single-stage models.
+
+* **simulate_heterog_multistage_fpt** — *General heterogeneous multi-stage*
+  DDM.  Each trial has its own per-stage drift, diffusion, boundary
+  intercepts, and boundary slopes, stored in padded 2-D arrays.  Stage
+  onset times (``node_array_data``) mark when parameters switch.  This is
+  the most flexible entry point and is called by ``_simulate_addm_fpt``.
+
+* **_simulate_addm_fpt** — *Attentional DDM* (aDDM) convenience wrapper.
+  Accepts the compact aDDM parameterisation (scalar ``sigma``, ``a``,
+  ``b``) and saccade onset times (``sacc_array_data``), expands them into
+  the full per-stage arrays, and delegates to
+  ``simulate_heterog_multistage_fpt``.  Used by
+  ``aDDModel.simulate_fpt``.
+
+All three use the same simulation engine:
+
+1. **Inline C-level PRNG** — xoshiro256++ seeded per trial via SplitMix64,
+   with Box-Muller transform for Gaussian draws.  No pre-allocated noise
+   matrix is needed, keeping memory usage O(n_trials) instead of
+   O(n_trials × max_steps).
+
+2. **OpenMP parallelism** — Trials are distributed across threads via
+   ``prange`` with dynamic scheduling.  Each thread has its own RNG state,
+   so results are deterministic for a given seed array regardless of
+   ``n_threads``.
+
+The per-trial logic lives in two ``cdef nogil`` helpers that are called
+from inside the ``prange`` loop and never touch the GIL:
+
+* ``_run_homog_trial`` — **step-indexed**.  Drift, diffusion, and
+  boundaries are pre-evaluated on a shared time grid (one value per
+  discrete time step).  Supports arbitrary time-dependent parameters
+  (e.g., Weibull survival boundaries) by table lookup at each step.
+
+* ``_run_heterog_trial`` — **stage-indexed**.  Drift and diffusion are
+  piecewise-constant per stage; boundaries are piecewise-linear
+  (intercept + slope × time-since-stage-onset).  Stage transitions
+  occur when the particle clock passes the next ``node_array`` entry.
+  Much more memory-efficient for multi-stage models (``max_d`` ≪
+  ``max_steps``) but limited to piecewise-constant/linear parameters.
+"""
 
 import numpy as np
 cimport numpy as np
@@ -100,6 +150,14 @@ cdef void _run_homog_trial(
     int *choice_out,
     double *x_final_out,
 ) noexcept nogil:
+    """Run a single trial using step-indexed parameter arrays (nogil).
+
+    Parameters are pre-evaluated on a shared time grid — one value per
+    discrete step — so drift, diffusion, and boundaries can be *arbitrary*
+    functions of time (looked up by step index).  Compare with
+    ``_run_heterog_trial`` which is stage-indexed and assumes
+    piecewise-constant drift and piecewise-linear boundaries.
+    """
     cdef:
         Xoshiro256State rng_state
         BoxMullerState bm_state
@@ -140,7 +198,7 @@ cdef void _run_homog_trial(
 cdef void _run_heterog_trial(
     double[:, ::1] mu_array_data,
     double[:, ::1] sigma_array_data,
-    double[:, ::1] sacc_array_data,
+    double[:, ::1] node_array_data,
     int d,
     double[:, ::1] ub_array_data,
     double[:, ::1] b1_array_data,
@@ -156,6 +214,15 @@ cdef void _run_heterog_trial(
     int *choice_out,
     double *x_final_out,
 ) noexcept nogil:
+    """Run a single trial using stage-indexed parameter arrays (nogil).
+
+    Drift and diffusion are piecewise-constant per stage; boundaries are
+    piecewise-linear (intercept + slope × time-since-stage-onset).  Stage
+    transitions occur when elapsed time passes the next ``node_array``
+    entry.  Much more memory-efficient than ``_run_homog_trial`` for
+    multi-stage models (``max_d`` ≪ ``max_steps``), but limited to
+    piecewise-constant/linear parameters.
+    """
     cdef:
         Xoshiro256State rng_state
         BoxMullerState bm_state
@@ -183,8 +250,8 @@ cdef void _run_heterog_trial(
         t_particle = t_particle + dt_curr
 
         # Boundary check with SAME stage used for drift (before advancing)
-        upper = ub_array_data[trial_idx, stage] + b1_array_data[trial_idx, stage] * (t_particle - sacc_array_data[trial_idx, stage])
-        lower = lb_array_data[trial_idx, stage] + b2_array_data[trial_idx, stage] * (t_particle - sacc_array_data[trial_idx, stage])
+        upper = ub_array_data[trial_idx, stage] + b1_array_data[trial_idx, stage] * (t_particle - node_array_data[trial_idx, stage])
+        lower = lb_array_data[trial_idx, stage] + b2_array_data[trial_idx, stage] * (t_particle - node_array_data[trial_idx, stage])
         if y >= upper:
             rt_out[0] = t_particle - half_dt_curr
             choice_out[0] = 1
@@ -195,13 +262,13 @@ cdef void _run_heterog_trial(
             break
 
         # Advance stage for NEXT iteration
-        while stage + 1 < d and t_particle >= sacc_array_data[trial_idx, stage + 1]:
+        while stage + 1 < d and t_particle >= node_array_data[trial_idx, stage + 1]:
             stage = stage + 1
 
     x_final_out[0] = y
 
 
-def simulate_homog_ddm_fpt_cy(
+def simulate_homog_ddm_fpt(
     double[::1] drift_vals,
     double[::1] diffusion_vals,
     double[::1] upper_vals,
@@ -258,10 +325,10 @@ def simulate_homog_ddm_fpt_cy(
     return rt_out, choice_out, x_final_out
 
 
-def simulate_heterog_multistage_fpt_cy(
+def simulate_heterog_multistage_fpt(
     double[:, ::1] mu_array_data,
     double[:, ::1] sigma_array_data,
-    double[:, ::1] sacc_array_data,
+    double[:, ::1] node_array_data,
     int[::1] d_data,
     double[:, ::1] ub_array_data,
     double[:, ::1] b1_array_data,
@@ -273,10 +340,49 @@ def simulate_heterog_multistage_fpt_cy(
     uint64_t[::1] trial_seeds,
     int n_threads=1,
 ):
-    """Simulate a batch of multi-stage DDM trials using Euler-Maruyama.
+    """Simulate a batch of heterogeneous multi-stage DDM trials.
 
-    Uses inline C-level RNG and OpenMP parallelism. Per-trial seeds
-    replace the pre-allocated Gaussian matrix.
+    This is the most general simulator: every trial can have different
+    per-stage drift, diffusion, boundary intercepts, slopes, and stage
+    onset times.  All arrays are padded to ``max_d`` columns; inactive
+    stages should be zero-filled.
+
+    Delegates each trial to ``_run_heterog_trial`` inside an OpenMP
+    ``prange`` loop.
+
+    Parameters
+    ----------
+    mu_array_data : (n_trials, max_d) float64
+        Per-stage drift rates.
+    sigma_array_data : (n_trials, max_d) float64
+        Per-stage diffusion coefficients.
+    node_array_data : (n_trials, max_d) float64
+        Per-stage onset times (``node_array_data[:, 0]`` should be 0).
+    d_data : (n_trials,) int32
+        Number of active stages per trial.
+    ub_array_data, lb_array_data : (n_trials, max_d) float64
+        Upper/lower boundary intercepts at the start of each stage.
+    b1_array_data, b2_array_data : (n_trials, max_d) float64
+        Upper/lower boundary slopes within each stage.
+    x0_data : (n_trials,) float64
+        Starting position per trial.
+    dt : double
+        Euler-Maruyama time step.
+    T : double
+        Maximum trial duration.
+    trial_seeds : (n_trials,) uint64
+        Per-trial PRNG seeds.
+    n_threads : int
+        Number of OpenMP threads (1 = serial).
+
+    Returns
+    -------
+    rt_out : (n_trials,) float64
+        Reaction times (-1.0 if the trial did not terminate by *T*).
+    choice_out : (n_trials,) int32
+        +1 (upper), -1 (lower), or 0 (no crossing).
+    x_final_out : (n_trials,) float64
+        Final particle position.
     """
     cdef:
         int n_trials = mu_array_data.shape[0]
@@ -300,7 +406,7 @@ def simulate_heterog_multistage_fpt_cy(
 
     for trial in prange(n_trials, nogil=True, num_threads=n_threads, schedule='dynamic'):
         _run_heterog_trial(
-            mu_array_data, sigma_array_data, sacc_array_data,
+            mu_array_data, sigma_array_data, node_array_data,
             d_data[trial],
             ub_array_data, b1_array_data, lb_array_data, b2_array_data,
             trial, x0_data[trial], dt, max_steps, T,
@@ -311,25 +417,62 @@ def simulate_heterog_multistage_fpt_cy(
     return rt_out, choice_out, x_final_out
 
 
-def simulate_addm_fpt_cy(
+def _simulate_addm_fpt(
     double[:, ::1] mu_array_data,
     double[:, ::1] sacc_array_data,
     int[::1] d_data,
     double sigma,
     double a,
     double b,
-    double x0,
+    double[::1] x0_data,
     double dt,
     double T,
     uint64_t[::1] trial_seeds,
     int n_threads=1,
 ):
-    """Simulate a batch of aDDM trials with inline RNG and OpenMP support."""
+    """Simulate a batch of aDDM trials via the general multi-stage simulator.
+    Internal function that takes a pre-built aDDM mu_array_data from eta, kappa, r1_data, r2_data, flag_data.
+
+    Convenience wrapper that expands the compact aDDM parameterisation
+    (scalar ``sigma``, ``a``, ``b``) into full per-stage arrays and
+    delegates to ``simulate_heterog_multistage_fpt``.  Boundary intercepts
+    are derived from ``a``, ``b``, and the saccade onset times as
+    ``ub = a - b * sacc``, ``lb = -(a - b * sacc)``.
+
+    Parameters
+    ----------
+    mu_array_data : (n_trials, max_d) float64
+        Pre-built alternating drift-rate array (from ``_build_addm_mu_array_data``).
+    sacc_array_data : (n_trials, max_d) float64
+        Saccade onset times (column 0 should be 0).
+    d_data : (n_trials,) int32
+        Number of fixation stages per trial.
+    sigma : double
+        Diffusion coefficient (constant across stages).
+    a : double
+        Boundary intercept at t=0.
+    b : double
+        Boundary collapse slope (>= 0).
+    x0_data : (n_trials,) float64
+        Starting position per trial.
+    dt : double
+        Euler-Maruyama time step.
+    T : double
+        Maximum trial duration.
+    trial_seeds : (n_trials,) uint64
+        Per-trial PRNG seeds.
+    n_threads : int
+        Number of OpenMP threads (1 = serial).
+
+    Returns
+    -------
+    rt_out, choice_out, x_final_out
+        Same as ``simulate_heterog_multistage_fpt``.
+    """
     cdef int n_trials = mu_array_data.shape[0]
     cdef int max_d = mu_array_data.shape[1]
 
     sigma_array_data = np.full((n_trials, max_d), sigma, dtype=np.float64)
-    x0_data = np.full(n_trials, x0, dtype=np.float64)
     b1_array_data = np.full((n_trials, max_d), -b, dtype=np.float64)
     b2_array_data = np.full((n_trials, max_d), b, dtype=np.float64)
 
@@ -337,7 +480,7 @@ def simulate_addm_fpt_cy(
     ub_array_data = np.ascontiguousarray(a - b * sacc_np, dtype=np.float64)
     lb_array_data = np.ascontiguousarray(-(a - b * sacc_np), dtype=np.float64)
 
-    return simulate_heterog_multistage_fpt_cy(
+    return simulate_heterog_multistage_fpt(
         mu_array_data, sigma_array_data, sacc_np,
         d_data,
         ub_array_data, b1_array_data,
