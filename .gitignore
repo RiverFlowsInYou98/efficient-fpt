@@ -183,6 +183,7 @@ examples/example5_error/error_analyses_scratch.ipynb
 
 misc/
 
-src/efficient_fpt/*.c
-src/efficient_fpt/*.so
-src/efficient_fpt/*.pyd
+src/efficient_fpt/**/*.c
+src/efficient_fpt/**/*.so
+src/efficient_fpt/**/*.pyd
+src/efficient_fpt/cython/_defaults.pxi
