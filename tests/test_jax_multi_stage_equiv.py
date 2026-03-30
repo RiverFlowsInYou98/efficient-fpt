@@ -1,376 +1,491 @@
-"""
-Equivalence tests for JAX multi-stage implementation.
+"""Equivalence and regression tests for the public JAX APIs."""
 
-Compares the JAX implementation against a Python reference implementation
-and (optionally) the Cython implementation.
-"""
-
-import pytest
 import numpy as np
+import pytest
 
-# Skip all tests if JAX is not installed
 jax = pytest.importorskip("jax")
 import jax.numpy as jnp
-from jax import vmap
+from jax import grad, value_and_grad
 
-from efficient_fpt.single_stage import fptd_single, q_single
-from efficient_fpt.multi_stage import lgwtLookupTable
-from efficient_fpt_jax.multi_stage import get_addm_fptd_jax
-
-
-def get_addm_fptd_python(t, d, mu_array, sacc_array, sigma, a, b, x0, bdy, 
-                          trunc_num=50, fixed_terms=True):
-    """
-    Pure Python reference implementation of get_addm_fptd.
-    
-    This is a direct translation of the Cython algorithm into pure Python,
-    using the fixed_terms flag for fair comparison with JAX.
-    """
-    order = 30
-    threshold = 1e-30  # Effectively disabled
-    
-    if d == 1:
-        return fptd_single(t, mu_array[0], sigma, a, -b, -a, b, x0, bdy, 
-                          trunc_num, threshold, fixed_terms)
-    
-    # Multi-stage case
-    x_ref, w_ref = lgwtLookupTable(order, -1.0, 1.0)
-    
-    # Initialize from stage 0 to stage 1
-    a_1 = a - b * sacc_array[1]
-    xs = x_ref * a_1
-    ws = w_ref * a_1
-    
-    # Compute distribution at end of stage 0
-    pv = np.array([
-        q_single(xs[i], mu_array[0], sigma, a, -b, -a, b, sacc_array[1], x0,
-                trunc_num, threshold, fixed_terms)
-        for i in range(order)
-    ])
-    
-    xs_prev = xs.copy()
-    ws_pv_prev = ws * pv
-    
-    # Propagate through intermediate stages
-    for n in range(2, d):
-        a_curr = a - b * sacc_array[n]
-        xs = x_ref * a_curr
-        ws = w_ref * a_curr
-        
-        a_prev = a - b * sacc_array[n-1]
-        T_curr = sacc_array[n] - sacc_array[n-1]
-        
-        pv_new = np.zeros(order)
-        for i in range(order):
-            for j in range(order):
-                temp = q_single(xs[i], mu_array[n-1], sigma, a_prev, -b, -a_prev, b, 
-                               T_curr, xs_prev[j], trunc_num, threshold, fixed_terms)
-                pv_new[i] += temp * ws_pv_prev[j]
-        
-        xs_prev = xs.copy()
-        ws_pv_prev = ws * pv_new
-    
-    # Final stage: compute FPTD weighted by entry distribution
-    a_final = a - b * sacc_array[d-1]
-    result = 0.0
-    for i in range(order):
-        fptd = fptd_single(t - sacc_array[d-1], mu_array[d-1], sigma, 
-                          a_final, -b, -a_final, b, xs_prev[i], bdy,
-                          trunc_num, threshold, fixed_terms)
-        result += fptd * ws_pv_prev[i]
-    
-    return result
+from efficient_fpt.jax.batch import (
+    compute_addm_likelihoods_batchscan,
+    compute_addm_likelihoods_batchvmap,
+    make_addm_nll_function_batchvmap,
+    compute_addm_likelihoods,
+    compute_addm_likelihoods_jit,
+    make_addm_nll_function,
+    make_addm_nll_function_batchscan,
+)
+from efficient_fpt.jax.multi_stage import (
+    compute_addm_fptd,
+    compute_addm_fptd_jit,
+    compute_heterog_multistage_fptd,
+    compute_heterog_multistage_fptd_jit,
+)
 
 
-class TestMultiStageEquivalence:
-    """Test equivalence of multi-stage implementations."""
-    
-    # Tolerances account for float32 vs float64 and minor algorithmic differences
-    RTOL = 1e-5
-    ATOL = 1e-6
-    TRUNC_NUM = 50
-    
-    @pytest.fixture
-    def addm_params(self):
-        """Standard aDDM parameters."""
-        return {
-            'sigma': 1.0, 'a': 1.5, 'b': 0.3, 'x0': 0.0
-        }
-    
-    def test_single_stage(self, addm_params):
-        """Test d=1 case (single stage, no propagation)."""
-        t = 1.0
-        d = 1
-        mu_array = np.array([0.5])
-        sacc_array = np.array([0.0])
-        bdy = 1
-        
-        # Pad arrays for JAX
-        max_d = 5
-        mu_array_padded = np.pad(mu_array, (0, max_d - 1))
-        sacc_array_padded = np.pad(sacc_array, (0, max_d - 1))
-        
-        py_result = get_addm_fptd_python(
-            t, d, mu_array, sacc_array, **addm_params, bdy=bdy,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
-        )
-        
-        jax_result = get_addm_fptd_jax(
-            t, d, jnp.array(mu_array_padded), jnp.array(sacc_array_padded), 
-            **addm_params, bdy=bdy, trunc_num=self.TRUNC_NUM
-        )
-        
-        np.testing.assert_allclose(py_result, float(jax_result), 
-                                   rtol=self.RTOL, atol=self.ATOL)
-    
-    @pytest.mark.parametrize("bdy", [1, -1])
-    def test_two_stages(self, addm_params, bdy):
-        """Test d=2 case."""
-        t = 2.0
-        d = 2
-        mu_array = np.array([0.3, -0.2])
-        sacc_array = np.array([0.0, 1.0])
-        
-        # Pad arrays for JAX
-        max_d = 5
-        mu_array_padded = np.pad(mu_array, (0, max_d - d))
-        sacc_array_padded = np.pad(sacc_array, (0, max_d - d))
-        
-        py_result = get_addm_fptd_python(
-            t, d, mu_array, sacc_array, **addm_params, bdy=bdy,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
-        )
-        
-        jax_result = get_addm_fptd_jax(
-            t, d, jnp.array(mu_array_padded), jnp.array(sacc_array_padded), 
-            **addm_params, bdy=bdy, trunc_num=self.TRUNC_NUM
-        )
-        
-        np.testing.assert_allclose(py_result, float(jax_result), 
-                                   rtol=self.RTOL, atol=self.ATOL)
-    
-    @pytest.mark.parametrize("bdy", [1, -1])
-    def test_three_stages(self, addm_params, bdy):
-        """Test d=3 case (multiple intermediate stages)."""
-        t = 3.0
-        d = 3
-        mu_array = np.array([0.5, -0.3, 0.2])
-        sacc_array = np.array([0.0, 1.0, 2.0])
-        
-        # Pad arrays
-        max_d = 5
-        mu_array_padded = np.pad(mu_array, (0, max_d - d))
-        sacc_array_padded = np.pad(sacc_array, (0, max_d - d))
-        
-        py_result = get_addm_fptd_python(
-            t, d, mu_array, sacc_array, **addm_params, bdy=bdy,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
-        )
-        
-        jax_result = get_addm_fptd_jax(
-            t, d, jnp.array(mu_array_padded), jnp.array(sacc_array_padded), 
-            **addm_params, bdy=bdy, trunc_num=self.TRUNC_NUM
-        )
-        
-        np.testing.assert_allclose(py_result, float(jax_result), 
-                                   rtol=self.RTOL, atol=self.ATOL)
-    
-    @pytest.mark.parametrize("bdy", [1, -1])
-    def test_four_stages(self, addm_params, bdy):
-        """Test d=4 case."""
-        t = 4.0
-        d = 4
-        mu_array = np.array([0.5, -0.3, 0.2, -0.1])
-        sacc_array = np.array([0.0, 1.0, 2.0, 3.0])
-        
-        max_d = 5
-        mu_array_padded = np.pad(mu_array, (0, max_d - d))
-        sacc_array_padded = np.pad(sacc_array, (0, max_d - d))
-        
-        py_result = get_addm_fptd_python(
-            t, d, mu_array, sacc_array, **addm_params, bdy=bdy,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
-        )
-        
-        jax_result = get_addm_fptd_jax(
-            t, d, jnp.array(mu_array_padded), jnp.array(sacc_array_padded), 
-            **addm_params, bdy=bdy, trunc_num=self.TRUNC_NUM
-        )
-        
-        np.testing.assert_allclose(py_result, float(jax_result), 
-                                   rtol=self.RTOL, atol=self.ATOL)
-    
-    @pytest.mark.parametrize("t_offset", [0.1, 0.5, 0.9])
-    def test_varied_response_times(self, addm_params, t_offset):
-        """Test with different response times within the final stage."""
-        d = 3
-        mu_array = np.array([0.5, -0.3, 0.2])
-        sacc_array = np.array([0.0, 1.0, 2.0])
-        t = 2.0 + t_offset  # Response in final stage
-        bdy = 1
-        
-        max_d = 5
-        mu_array_padded = np.pad(mu_array, (0, max_d - d))
-        sacc_array_padded = np.pad(sacc_array, (0, max_d - d))
-        
-        py_result = get_addm_fptd_python(
-            t, d, mu_array, sacc_array, **addm_params, bdy=bdy,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
-        )
-        
-        jax_result = get_addm_fptd_jax(
-            t, d, jnp.array(mu_array_padded), jnp.array(sacc_array_padded), 
-            **addm_params, bdy=bdy, trunc_num=self.TRUNC_NUM
-        )
-        
-        np.testing.assert_allclose(py_result, float(jax_result), 
-                                   rtol=self.RTOL, atol=self.ATOL)
-    
-    @pytest.mark.parametrize("x0", [-0.3, 0.0, 0.3])
-    def test_varied_starting_position(self, x0):
-        """Test with different starting positions."""
-        params = {'sigma': 1.0, 'a': 1.5, 'b': 0.3}
-        t = 2.5
-        d = 3
-        mu_array = np.array([0.5, -0.3, 0.2])
-        sacc_array = np.array([0.0, 1.0, 2.0])
-        bdy = 1
-        
-        max_d = 5
-        mu_array_padded = np.pad(mu_array, (0, max_d - d))
-        sacc_array_padded = np.pad(sacc_array, (0, max_d - d))
-        
-        py_result = get_addm_fptd_python(
-            t, d, mu_array, sacc_array, **params, x0=x0, bdy=bdy,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
-        )
-        
-        jax_result = get_addm_fptd_jax(
-            t, d, jnp.array(mu_array_padded), jnp.array(sacc_array_padded), 
-            **params, x0=x0, bdy=bdy, trunc_num=self.TRUNC_NUM
-        )
-        
-        np.testing.assert_allclose(py_result, float(jax_result), 
-                                   rtol=self.RTOL, atol=self.ATOL)
+def _addm_public_batch_inputs():
+    rt_data = jnp.array([0.9, 1.5, 2.0], dtype=jnp.float64)
+    choice_data = jnp.array([1, -1, 1], dtype=jnp.int32)
+    r1_data = jnp.array([0.45, 0.30, 0.20], dtype=jnp.float64)
+    r2_data = jnp.array([0.10, 0.55, 0.40], dtype=jnp.float64)
+    flag_data = jnp.array([0, 1, 0], dtype=jnp.int32)
+    sacc_array_data = jnp.array(
+        [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.7, 0.0, 0.0],
+            [0.0, 0.6, 1.3, 0.0],
+        ],
+        dtype=jnp.float64,
+    )
+    d_data = jnp.array([1, 2, 3], dtype=jnp.int32)
+    params = dict(eta=0.25, kappa=1.1, sigma=1.0, a=1.6, b=0.25, x0=0.0)
+    return (
+        rt_data,
+        choice_data,
+        r1_data,
+        r2_data,
+        flag_data,
+        sacc_array_data,
+        d_data,
+        params,
+    )
 
 
-class TestBatchedMultiStage:
-    """Test batched computation using vmap."""
-    
-    # Tolerances account for float32 vs float64 and minor algorithmic differences
-    RTOL = 1e-5
-    ATOL = 1e-6
-    TRUNC_NUM = 50
-    
-    def test_vmap_over_trials(self):
-        """Test vmapping over multiple trials."""
-        n_trials = 5
-        max_d = 4
-        
-        # Create test data
-        rts = np.array([1.5, 2.0, 2.5, 3.0, 1.8])
-        choices = np.array([1, -1, 1, -1, 1])
-        lengths = np.array([2, 3, 2, 4, 3])
-        
-        # Padded drift arrays
-        mu_arrays = np.array([
-            [0.3, -0.2, 0.0, 0.0],
-            [0.5, -0.3, 0.2, 0.0],
-            [0.4, -0.1, 0.0, 0.0],
-            [0.2, -0.4, 0.3, -0.1],
-            [0.6, -0.2, 0.1, 0.0],
-        ])
-        
-        sacc_arrays = np.array([
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.8, 1.6, 0.0],
-            [0.0, 1.2, 0.0, 0.0],
-            [0.0, 0.7, 1.4, 2.1],
-            [0.0, 0.5, 1.2, 0.0],
-        ])
-        
-        sigma, a, b, x0 = 1.0, 1.5, 0.3, 0.0
-        
-        # Reference: loop over trials
-        py_results = []
-        for i in range(n_trials):
-            result = get_addm_fptd_python(
-                rts[i], int(lengths[i]), 
-                mu_arrays[i, :int(lengths[i])],
-                sacc_arrays[i, :int(lengths[i])],
-                sigma, a, b, x0, int(choices[i]),
-                trunc_num=self.TRUNC_NUM, fixed_terms=True
+class TestJaxAddmBatch:
+    def test_compute_addm_likelihoods_matches_scalar_loop(self):
+        (
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            params,
+        ) = _addm_public_batch_inputs()
+
+        batch_vals = np.asarray(
+            compute_addm_likelihoods(
+                rt_data,
+                choice_data,
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order=20,
+                trunc_num=25,
+                log_space=False,
             )
-            py_results.append(result)
-        py_results = np.array(py_results)
-        
-        # JAX: vmap over trials
-        def single_trial(rt, choice, mu_array, sacc_array, d):
-            return get_addm_fptd_jax(
-                rt, d, mu_array, sacc_array, 
-                sigma, a, b, x0, choice, 
-                trunc_num=self.TRUNC_NUM
+        )
+
+        scalar_vals = np.asarray(
+            [
+                compute_addm_fptd(
+                    float(rt_data[i]),
+                    int(choice_data[i]),
+                    params["eta"],
+                    params["kappa"],
+                    params["sigma"],
+                    params["a"],
+                    params["b"],
+                    params["x0"],
+                    float(r1_data[i]),
+                    float(r2_data[i]),
+                    int(flag_data[i]),
+                    sacc_array_data[i],
+                    int(d_data[i]),
+                    order=20,
+                    trunc_num=25,
+                    log_space=False,
+                )
+                for i in range(len(rt_data))
+            ]
+        )
+
+        np.testing.assert_allclose(batch_vals, scalar_vals, rtol=1e-8, atol=1e-10)
+
+    @pytest.mark.parametrize(
+        "fn",
+        [compute_addm_likelihoods_batchvmap, compute_addm_likelihoods_batchscan],
+    )
+    def test_use_remat_preserves_batch_likelihoods(self, fn):
+        (
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            params,
+        ) = _addm_public_batch_inputs()
+
+        base = np.asarray(
+            fn(
+                rt_data,
+                choice_data,
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order=20,
+                trunc_num=25,
+                log_space=True,
+                use_remat=False,
             )
-        
-        batched_fn = vmap(single_trial, in_axes=(0, 0, 0, 0, 0))
-        jax_results = batched_fn(
-            jnp.array(rts), jnp.array(choices),
-            jnp.array(mu_arrays), jnp.array(sacc_arrays),
-            jnp.array(lengths)
         )
-        
-        np.testing.assert_allclose(py_results, np.array(jax_results), 
-                                   rtol=self.RTOL, atol=self.ATOL)
-
-
-class TestCythonEquivalence:
-    """Test equivalence with Cython implementation (if available)."""
-    
-    RTOL = 1e-6  # Looser tolerance due to early termination differences
-    ATOL = 1e-8
-    TRUNC_NUM = 100  # More terms to match Cython behavior
-    
-    @pytest.fixture
-    def cython_available(self):
-        """Check if Cython implementation is available."""
-        try:
-            from efficient_fpt.multi_stage_cy import get_addm_fptd_cy
-            return True
-        except ImportError:
-            return False
-    
-    @pytest.mark.parametrize("bdy", [1, -1])
-    def test_against_cython(self, cython_available, bdy):
-        """Compare JAX with Cython implementation."""
-        if not cython_available:
-            pytest.skip("Cython implementation not available")
-        
-        from efficient_fpt.multi_stage_cy import get_addm_fptd_cy
-        
-        t = 2.5
-        d = 3
-        mu_array = np.array([0.5, -0.3, 0.2])
-        sacc_array = np.array([0.0, 1.0, 2.0])
-        sigma, a, b, x0 = 1.0, 1.5, 0.3, 0.0
-        
-        max_d = 5
-        mu_array_padded = np.pad(mu_array, (0, max_d - d))
-        sacc_array_padded = np.pad(sacc_array, (0, max_d - d))
-        
-        cy_result = get_addm_fptd_cy(
-            t, d, mu_array, sacc_array, sigma, a, b, x0, bdy,
-            trunc_num=self.TRUNC_NUM, threshold=1e-30  # Minimize early termination
+        remat = np.asarray(
+            fn(
+                rt_data,
+                choice_data,
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order=20,
+                trunc_num=25,
+                log_space=True,
+                use_remat=True,
+            )
         )
-        
-        jax_result = get_addm_fptd_jax(
-            t, d, jnp.array(mu_array_padded), jnp.array(sacc_array_padded), 
-            sigma, a, b, x0, bdy, trunc_num=self.TRUNC_NUM
+
+        np.testing.assert_allclose(remat, base, rtol=1e-8, atol=1e-10)
+
+    def test_compute_addm_likelihoods_jit_matches_nonjit(self):
+        (
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            params,
+        ) = _addm_public_batch_inputs()
+
+        expected = np.asarray(
+            compute_addm_likelihoods(
+                rt_data,
+                choice_data,
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order=20,
+                trunc_num=25,
+                log_space=True,
+            )
         )
-        
-        np.testing.assert_allclose(cy_result, float(jax_result), 
-                                   rtol=self.RTOL, atol=self.ATOL)
+        actual = np.asarray(
+            compute_addm_likelihoods_jit(
+                rt_data,
+                choice_data,
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order=20,
+                trunc_num=25,
+                log_space=True,
+            )
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)
+
+    def test_make_addm_nll_function_matches_legacy_vmap_gradients(self):
+        (
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            params,
+        ) = _addm_public_batch_inputs()
+
+        legacy = make_addm_nll_function_batchvmap(
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            order=20,
+            trunc_num=25,
+            log_space=True,
+        )
+        current = make_addm_nll_function(
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            order=20,
+            trunc_num=25,
+            log_space=True,
+        )
+
+        param_vec = jnp.array(
+            [
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+            ],
+            dtype=jnp.float64,
+        )
+
+        legacy_loss, legacy_grad = value_and_grad(
+            lambda p: legacy(p[0], p[1], p[2], p[3], p[4], p[5])
+        )(param_vec)
+        current_loss, current_grad = value_and_grad(
+            lambda p: current(p[0], p[1], p[2], p[3], p[4], p[5])
+        )(param_vec)
+
+        np.testing.assert_allclose(
+            np.asarray(current_loss), np.asarray(legacy_loss), rtol=1e-8, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            np.asarray(current_grad), np.asarray(legacy_grad), rtol=1e-7, atol=1e-9
+        )
+
+    @pytest.mark.parametrize(
+        "factory",
+        [make_addm_nll_function_batchvmap, make_addm_nll_function_batchscan],
+    )
+    def test_use_remat_preserves_nll_factory_values_and_gradients(self, factory):
+        (
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            params,
+        ) = _addm_public_batch_inputs()
+
+        base_fn = factory(
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            order=20,
+            trunc_num=25,
+            log_space=True,
+            use_remat=False,
+        )
+        remat_fn = factory(
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            order=20,
+            trunc_num=25,
+            log_space=True,
+            use_remat=True,
+        )
+
+        param_vec = jnp.array(
+            [
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+            ],
+            dtype=jnp.float64,
+        )
+
+        base_loss, base_grad = value_and_grad(
+            lambda p: base_fn(p[0], p[1], p[2], p[3], p[4], p[5])
+        )(param_vec)
+        remat_loss, remat_grad = value_and_grad(
+            lambda p: remat_fn(p[0], p[1], p[2], p[3], p[4], p[5])
+        )(param_vec)
+
+        np.testing.assert_allclose(
+            np.asarray(remat_loss), np.asarray(base_loss), rtol=1e-8, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            np.asarray(remat_grad), np.asarray(base_grad), rtol=1e-7, atol=1e-9
+        )
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestJaxScalarJit:
+    def test_compute_addm_fptd_jit_matches_nonjit(self):
+        sacc_array = jnp.array([0.0, 0.7, 1.2, 0.0], dtype=jnp.float64)
+        expected = float(
+            compute_addm_fptd(
+                1.7,
+                1,
+                0.25,
+                1.1,
+                1.0,
+                1.5,
+                0.3,
+                0.0,
+                0.4,
+                0.2,
+                0,
+                sacc_array,
+                3,
+                order=30,
+                trunc_num=25,
+                log_space=True,
+            )
+        )
+        actual = float(
+            compute_addm_fptd_jit(
+                1.7,
+                1,
+                0.25,
+                1.1,
+                1.0,
+                1.5,
+                0.3,
+                0.0,
+                0.4,
+                0.2,
+                0,
+                sacc_array,
+                3,
+                order=30,
+                trunc_num=25,
+                log_space=True,
+            )
+        )
 
+        np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)
+
+
+class TestJaxScalarGradients:
+    def test_compute_heterog_multistage_fptd_grad_matches_finite_difference(self):
+        mu_array = jnp.array([0.35, -0.15, 0.08, 0.0, 0.0], dtype=jnp.float64)
+        node_array = jnp.array([0.0, 0.55, 1.25, 0.0, 0.0], dtype=jnp.float64)
+        sigma_array = jnp.array([1.0, 0.9, 1.1, 1.0, 1.0], dtype=jnp.float64)
+        b1_array = jnp.array([-0.22, -0.12, -0.05, 0.0, 0.0], dtype=jnp.float64)
+        b2_array = jnp.array([0.18, 0.14, 0.06, 0.0, 0.0], dtype=jnp.float64)
+        x0 = 0.05
+        a2 = -1.35
+        eps = 1e-5
+
+        def f(a1):
+            return compute_heterog_multistage_fptd(
+                1.75,
+                1,
+                x0,
+                a1,
+                a2,
+                mu_array,
+                node_array,
+                sigma_array,
+                b1_array,
+                b2_array,
+                3,
+                order=24,
+                trunc_num=30,
+                log_space=True,
+            )
+
+        autodiff_grad = float(grad(f)(1.45))
+        finite_diff_grad = float((f(1.45 + eps) - f(1.45 - eps)) / (2.0 * eps))
+
+        np.testing.assert_allclose(
+            autodiff_grad, finite_diff_grad, rtol=5e-4, atol=1e-7
+        )
+
+    def test_compute_heterog_multistage_fptd_jit_matches_nonjit(self):
+        mu_array = jnp.array([0.4, -0.2, 0.1, 0.0, 0.0], dtype=jnp.float64)
+        node_array = jnp.array([0.0, 0.6, 1.3, 0.0, 0.0], dtype=jnp.float64)
+        sigma_array = jnp.ones(5, dtype=jnp.float64)
+        b1_array = jnp.full(5, -0.3, dtype=jnp.float64)
+        b2_array = jnp.full(5, 0.3, dtype=jnp.float64)
+
+        expected = float(
+            compute_heterog_multistage_fptd(
+                1.9,
+                1,
+                0.0,
+                1.5,
+                -1.5,
+                mu_array,
+                node_array,
+                sigma_array,
+                b1_array,
+                b2_array,
+                3,
+                order=30,
+                trunc_num=25,
+                log_space=True,
+            )
+        )
+        actual = float(
+            compute_heterog_multistage_fptd_jit(
+                1.9,
+                1,
+                0.0,
+                1.5,
+                -1.5,
+                mu_array,
+                node_array,
+                sigma_array,
+                b1_array,
+                b2_array,
+                3,
+                order=30,
+                trunc_num=25,
+                log_space=True,
+            )
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)

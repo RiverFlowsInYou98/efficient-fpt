@@ -14,8 +14,11 @@ import jax.numpy as jnp
 from jax import vmap
 
 from efficient_fpt.single_stage import fptd_basic, q_basic, fptd_single, q_single
-from efficient_fpt_jax.single_stage import (
-    fptd_basic_jax, q_basic_jax, fptd_single_jax, q_single_jax
+from efficient_fpt.jax.single_stage import (
+    fptd_basic as fptd_basic_jax,
+    q_basic as q_basic_jax,
+    fptd_single as fptd_single_jax,
+    q_single as q_single_jax,
 )
 
 
@@ -39,7 +42,7 @@ class TestFPTDBasicEquivalence:
         """Test fptd_basic matches across implementations."""
         np_result = fptd_basic(
             t, **standard_params, bdy=bdy, 
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
+            trunc_num=self.TRUNC_NUM, adaptive_stopping=False
         )
         jax_result = fptd_basic_jax(
             t, **standard_params, bdy=bdy, 
@@ -59,7 +62,7 @@ class TestFPTDBasicEquivalence:
         bdy = 1
         
         np_result = fptd_basic(t, **params, bdy=bdy, 
-                               trunc_num=self.TRUNC_NUM, fixed_terms=True)
+                               trunc_num=self.TRUNC_NUM, adaptive_stopping=False)
         jax_result = fptd_basic_jax(t, **params, bdy=bdy, 
                                      trunc_num=self.TRUNC_NUM)
         
@@ -74,7 +77,7 @@ class TestFPTDBasicEquivalence:
         # NumPy version (loop)
         np_results = np.array([
             fptd_basic(t, **standard_params, bdy=bdy, 
-                      trunc_num=self.TRUNC_NUM, fixed_terms=True)
+                      trunc_num=self.TRUNC_NUM, adaptive_stopping=False)
             for t in t_array
         ])
         
@@ -82,7 +85,7 @@ class TestFPTDBasicEquivalence:
         jax_fn = lambda t: fptd_basic_jax(
             t, standard_params['mu'], standard_params['a1'], 
             standard_params['b1'], standard_params['a2'], 
-            standard_params['b2'], bdy, self.TRUNC_NUM
+            standard_params['b2'], bdy, trunc_num=self.TRUNC_NUM
         )
         jax_results = vmap(jax_fn)(jnp.array(t_array))
         
@@ -109,7 +112,7 @@ class TestQBasicEquivalence:
         """Test q_basic matches across implementations."""
         np_result = q_basic(
             x, **standard_params,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
+            trunc_num=self.TRUNC_NUM, adaptive_stopping=False
         )
         jax_result = q_basic_jax(
             x, **standard_params,
@@ -127,7 +130,7 @@ class TestQBasicEquivalence:
         # NumPy version (loop)
         np_results = np.array([
             q_basic(x, **standard_params, 
-                   trunc_num=self.TRUNC_NUM, fixed_terms=True)
+                   trunc_num=self.TRUNC_NUM, adaptive_stopping=False)
             for x in x_array
         ])
         
@@ -136,8 +139,7 @@ class TestQBasicEquivalence:
             jnp.array(x_array), 
             standard_params['mu'], standard_params['a1'], 
             standard_params['b1'], standard_params['a2'], 
-            standard_params['b2'], standard_params['T'],
-            self.TRUNC_NUM
+            standard_params['b2'], standard_params['T'], trunc_num=self.TRUNC_NUM
         )
         
         np.testing.assert_allclose(np_results, np.array(jax_results), 
@@ -168,7 +170,7 @@ class TestBroadcastingBehavior:
             xs[:, None],      # (order, 1)
             mu, sigma, a1, b1, a2, b2, T,
             xs_prev[None, :], # (1, order)
-            self.TRUNC_NUM
+            trunc_num=self.TRUNC_NUM
         )  # Should be (order, order)
         
         assert P_broadcast.shape == (order, order)
@@ -179,7 +181,7 @@ class TestBroadcastingBehavior:
             for j in range(order):
                 P_loop[i, j] = float(q_single_jax(
                     float(xs[i]), mu, sigma, a1, b1, a2, b2, T, 
-                    float(xs_prev[j]), self.TRUNC_NUM
+                    float(xs_prev[j]), trunc_num=self.TRUNC_NUM
                 ))
         
         np.testing.assert_allclose(np.array(P_broadcast), P_loop, 
@@ -197,12 +199,14 @@ class TestBroadcastingBehavior:
         
         # Broadcasted
         fptds_broadcast = fptd_single_jax(
-            t, mu, sigma, a1, b1, a2, b2, x0_array, bdy, self.TRUNC_NUM
+            t, mu, sigma, a1, b1, a2, b2, x0_array, bdy, trunc_num=self.TRUNC_NUM
         )
         
         # Loop reference
         fptds_loop = jnp.array([
-            fptd_single_jax(t, mu, sigma, a1, b1, a2, b2, float(x0), bdy, self.TRUNC_NUM)
+            fptd_single_jax(
+                t, mu, sigma, a1, b1, a2, b2, float(x0), bdy, trunc_num=self.TRUNC_NUM
+            )
             for x0 in x0_array
         ])
         
@@ -230,10 +234,10 @@ class TestSingleStageWrapperEquivalence:
         
         np_result = fptd_single(
             t, mu, sigma, a1, b1, a2, b2, x0, bdy,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
+            trunc_num=self.TRUNC_NUM, adaptive_stopping=False
         )
         jax_result = fptd_single_jax(
-            t, mu, sigma, a1, b1, a2, b2, x0, bdy, self.TRUNC_NUM
+            t, mu, sigma, a1, b1, a2, b2, x0, bdy, trunc_num=self.TRUNC_NUM
         )
         
         np.testing.assert_allclose(np_result, float(jax_result),
@@ -251,10 +255,10 @@ class TestSingleStageWrapperEquivalence:
         
         np_result = q_single(
             x, mu, sigma, a1, b1, a2, b2, T, x0,
-            trunc_num=self.TRUNC_NUM, fixed_terms=True
+            trunc_num=self.TRUNC_NUM, adaptive_stopping=False
         )
         jax_result = q_single_jax(
-            x, mu, sigma, a1, b1, a2, b2, T, x0, self.TRUNC_NUM
+            x, mu, sigma, a1, b1, a2, b2, T, x0, trunc_num=self.TRUNC_NUM
         )
         
         np.testing.assert_allclose(np_result, float(jax_result),
@@ -263,4 +267,3 @@ class TestSingleStageWrapperEquivalence:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
