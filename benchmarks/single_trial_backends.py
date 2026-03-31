@@ -14,6 +14,7 @@ import time
 from benchmarks.common import (
     add_common_cli_arguments,
     add_jax_precision_argument,
+    add_quadrature_order_arguments,
     benchmark_jax_forward_callable,
     best_time,
     format_kib,
@@ -22,6 +23,7 @@ from benchmarks.common import (
     make_single_trial_test_data_jax,
     make_single_trial_test_data_np,
     make_metrics,
+    resolve_cli_quadrature_orders,
     summarize_value,
     units_per_second,
     write_json_output,
@@ -32,6 +34,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_cli_arguments(parser)
     add_jax_precision_argument(parser, default="float64")
+    add_quadrature_order_arguments(parser)
     parser.add_argument(
         "--d-values",
         type=int,
@@ -57,15 +60,17 @@ def parse_args():
         default=10,
         help="Fixed single-stage truncation length for JAX public APIs.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.order_mid, args.order_last = resolve_cli_quadrature_orders(args)
+    return args
 
 
-def build_jax_variants(jnp, data, trunc_num: int):
+def build_jax_variants(jnp, data, order_mid: int, order_last: int, trunc_num: int):
     from efficient_fpt.jax.multi_stage import (
-        compute_addm_fptd_precomputed,
-        compute_addm_fptd_stagescan,
-        compute_heterog_multistage_fptd_precomputed,
-        compute_heterog_multistage_fptd_stagescan,
+        compute_addm_logfptd_precomputed,
+        compute_addm_logfptd_stagescan,
+        compute_heterog_multistage_logfptd_precomputed,
+        compute_heterog_multistage_logfptd_stagescan,
     )
 
     t = data["t"]
@@ -85,7 +90,7 @@ def build_jax_variants(jnp, data, trunc_num: int):
 
     variants = {}
     for log_space, log_tag in ((False, "normal"), (True, "log")):
-        variants[f"jax/addm/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_fptd_precomputed(
+        variants[f"jax/addm/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_logfptd_precomputed(
             t,
             1,
             0.0,
@@ -99,10 +104,12 @@ def build_jax_variants(jnp, data, trunc_num: int):
             flag,
             node_arr,
             d,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
-        variants[f"jax/addm/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_fptd_stagescan(
+        variants[f"jax/addm/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_logfptd_stagescan(
             t,
             1,
             0.0,
@@ -116,10 +123,12 @@ def build_jax_variants(jnp, data, trunc_num: int):
             flag,
             node_arr,
             d,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
-        variants[f"jax/multi/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_fptd_precomputed(
+        variants[f"jax/multi/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_logfptd_precomputed(
             t,
             1,
             x0,
@@ -131,10 +140,12 @@ def build_jax_variants(jnp, data, trunc_num: int):
             jnp.full(_shape, -b_),
             jnp.full(_shape, b_),
             d,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
-        variants[f"jax/multi/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_fptd_stagescan(
+        variants[f"jax/multi/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_logfptd_stagescan(
             t,
             1,
             x0,
@@ -146,6 +157,8 @@ def build_jax_variants(jnp, data, trunc_num: int):
             jnp.full(_shape, -b_),
             jnp.full(_shape, b_),
             d,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
@@ -159,8 +172,8 @@ def main():
     jax_calls = 2 if args.smoke else args.jax_calls
 
     from efficient_fpt.cython.multi_stage import (
-        compute_addm_fptd as cython_addm_fptd,
-        compute_heterog_multistage_fptd as cython_multi_fptd,
+        compute_addm_logfptd as cython_addm_logfptd,
+        compute_heterog_multistage_logfptd as cython_multi_logfptd,
     )
 
     jax, jnp = import_jax(args.precision)
@@ -179,7 +192,7 @@ def main():
         data_jax = make_single_trial_test_data_jax(jnp, d)
 
         cython_variants = {
-            "cython/addm/normal": lambda: cython_addm_fptd(
+            "cython/addm/normal": lambda: cython_addm_logfptd(
                 t,
                 1,
                 0.0,
@@ -193,9 +206,11 @@ def main():
                 0,
                 node,
                 d,
+                order_mid=args.order_mid,
+                order_last=args.order_last,
                 log_space=False,
             ),
-            "cython/addm/log": lambda: cython_addm_fptd(
+            "cython/addm/log": lambda: cython_addm_logfptd(
                 t,
                 1,
                 0.0,
@@ -209,9 +224,11 @@ def main():
                 0,
                 node,
                 d,
+                order_mid=args.order_mid,
+                order_last=args.order_last,
                 log_space=True,
             ),
-            "cython/multi/normal": lambda: cython_multi_fptd(
+            "cython/multi/normal": lambda: cython_multi_logfptd(
                 t,
                 1,
                 x0,
@@ -223,9 +240,11 @@ def main():
                 b1_arr,
                 b2_arr,
                 d,
+                order_mid=args.order_mid,
+                order_last=args.order_last,
                 log_space=False,
             ),
-            "cython/multi/log": lambda: cython_multi_fptd(
+            "cython/multi/log": lambda: cython_multi_logfptd(
                 t,
                 1,
                 x0,
@@ -237,6 +256,8 @@ def main():
                 b1_arr,
                 b2_arr,
                 d,
+                order_mid=args.order_mid,
+                order_last=args.order_last,
                 log_space=True,
             ),
         }
@@ -250,6 +271,8 @@ def main():
                     "api_kind": "single_trial_forward",
                     "workload": {"d": d},
                     "compute": {
+                        "order_mid": args.order_mid,
+                        "order_last": args.order_last,
                         "n_calls": cython_calls,
                         "trunc_num": None,
                         "precision": "float64",
@@ -267,7 +290,9 @@ def main():
                 f"{'N/A':>10s}  {result:18.10e}"
             )
 
-        for name, fn in build_jax_variants(jnp, data_jax, args.trunc_num).items():
+        for name, fn in build_jax_variants(
+            jnp, data_jax, args.order_mid, args.order_last, args.trunc_num
+        ).items():
             params = (data_jax["sigma"], data_jax["a"], data_jax["b"])
             timed = benchmark_jax_forward_callable(
                 jax,
@@ -283,6 +308,8 @@ def main():
                     "api_kind": "single_trial_forward",
                     "workload": {"d": d},
                     "compute": {
+                        "order_mid": args.order_mid,
+                        "order_last": args.order_last,
                         "n_calls": jax_calls,
                         "trunc_num": args.trunc_num,
                         "precision": args.precision,

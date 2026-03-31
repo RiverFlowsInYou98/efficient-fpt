@@ -13,6 +13,7 @@ import argparse
 from benchmarks.common import (
     add_common_cli_arguments,
     add_jax_precision_argument,
+    add_quadrature_order_arguments,
     benchmark_jax_forward_callable,
     benchmark_jax_scalar_objective,
     format_kib,
@@ -20,6 +21,7 @@ from benchmarks.common import (
     import_jax,
     make_batch_addm_dataset,
     make_metrics,
+    resolve_cli_quadrature_orders,
     resolve_precision_values,
     summarize_gradient_tree,
     summarize_value,
@@ -40,7 +42,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_cli_arguments(parser)
     add_jax_precision_argument(parser, allow_both=True, default="both")
-    parser.add_argument("--order", type=int, default=30, help="Quadrature order.")
+    add_quadrature_order_arguments(parser)
     parser.add_argument(
         "--trunc-num",
         type=int,
@@ -53,7 +55,9 @@ def parse_args():
         default=10,
         help="Number of timing calls after compilation.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.order_mid, args.order_last = resolve_cli_quadrature_orders(args)
+    return args
 
 def main():
     args = parse_args()
@@ -70,8 +74,8 @@ def main():
     for precision in precision_values:
         jax, jnp = import_jax(precision)
         from efficient_fpt.jax.batch import (
-            compute_addm_likelihoods_batchscan,
-            compute_addm_likelihoods_batchvmap,
+            compute_addm_loglikelihoods_batchscan,
+            compute_addm_loglikelihoods_batchvmap,
             make_addm_nll_function_batchscan,
             make_addm_nll_function_batchvmap,
         )
@@ -98,7 +102,7 @@ def main():
                 )
 
                 likelihood_variants = {
-                    "batchvmap": lambda eta, kappa, sigma, a, b, x0: compute_addm_likelihoods_batchvmap(
+                    "batchvmap": lambda eta, kappa, sigma, a, b, x0: compute_addm_loglikelihoods_batchvmap(
                         dataset["rt_data"],
                         dataset["choice_data"],
                         eta,
@@ -112,11 +116,12 @@ def main():
                         dataset["flag_data"],
                         dataset["sacc_array_data"],
                         dataset["d_data"],
-                        order=args.order,
+                        order_mid=args.order_mid,
+                        order_last=args.order_last,
                         trunc_num=args.trunc_num,
                         log_space=log_space,
                     ),
-                    "batchscan": lambda eta, kappa, sigma, a, b, x0: compute_addm_likelihoods_batchscan(
+                    "batchscan": lambda eta, kappa, sigma, a, b, x0: compute_addm_loglikelihoods_batchscan(
                         dataset["rt_data"],
                         dataset["choice_data"],
                         eta,
@@ -130,7 +135,8 @@ def main():
                         dataset["flag_data"],
                         dataset["sacc_array_data"],
                         dataset["d_data"],
-                        order=args.order,
+                        order_mid=args.order_mid,
+                        order_last=args.order_last,
                         trunc_num=args.trunc_num,
                         log_space=log_space,
                     ),
@@ -147,14 +153,15 @@ def main():
                     records.append(
                         {
                             "variant": variant_name,
-                            "api_kind": "likelihood",
+                                "api_kind": "loglikelihood",
                             "workload": {
                                 "name": workload_name,
                                 "n_trials": n_trials,
                                 "max_d": max_d,
                             },
                             "compute": {
-                                "order": args.order,
+                                "order_mid": args.order_mid,
+                                "order_last": args.order_last,
                                 "trunc_num": args.trunc_num,
                                 "log_space": log_space,
                                 "n_calls": n_calls,
@@ -175,7 +182,7 @@ def main():
                         }
                     )
                     print(
-                        f"{workload_name:10s}  {'likelihood':14s}  {variant_name:24s}  "
+                        f"{workload_name:10s}  {'loglikelihood':14s}  {variant_name:24s}  "
                         f"{timed['compile']['forward_s']:10.4f}  "
                         f"{timed['runtime']['forward_s'] * 1e3:10.3f}  {'-':>10s}  "
                         f"{'-':>14s}  "
@@ -192,7 +199,8 @@ def main():
                         dataset["flag_data"],
                         dataset["sacc_array_data"],
                         dataset["d_data"],
-                        order=args.order,
+                        order_mid=args.order_mid,
+                        order_last=args.order_last,
                         trunc_num=args.trunc_num,
                         log_space=log_space,
                         use_remat=False,
@@ -205,7 +213,8 @@ def main():
                         dataset["flag_data"],
                         dataset["sacc_array_data"],
                         dataset["d_data"],
-                        order=args.order,
+                        order_mid=args.order_mid,
+                        order_last=args.order_last,
                         trunc_num=args.trunc_num,
                         log_space=log_space,
                         use_remat=True,
@@ -218,7 +227,8 @@ def main():
                         dataset["flag_data"],
                         dataset["sacc_array_data"],
                         dataset["d_data"],
-                        order=args.order,
+                        order_mid=args.order_mid,
+                        order_last=args.order_last,
                         trunc_num=args.trunc_num,
                         log_space=log_space,
                         use_remat=False,
@@ -231,7 +241,8 @@ def main():
                         dataset["flag_data"],
                         dataset["sacc_array_data"],
                         dataset["d_data"],
-                        order=args.order,
+                        order_mid=args.order_mid,
+                        order_last=args.order_last,
                         trunc_num=args.trunc_num,
                         log_space=log_space,
                         use_remat=True,
@@ -258,7 +269,8 @@ def main():
                                 "max_d": max_d,
                             },
                             "compute": {
-                                "order": args.order,
+                                "order_mid": args.order_mid,
+                                "order_last": args.order_last,
                                 "trunc_num": args.trunc_num,
                                 "log_space": log_space,
                                 "n_calls": n_calls,

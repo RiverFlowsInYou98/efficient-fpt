@@ -14,11 +14,11 @@ The scripts are organized by performance question rather than by backend:
   - reports forward/value-and-grad compile and runtime, backward proxy, throughput, and XLA memory
 - `batch_gpu_methods.py`
   - recommended starting point for GPU gradient-based MCMC work
-  - compares public batch likelihood APIs and public NLL factories
+  - compares public batch log-likelihood APIs and public NLL factories
   - includes remat-enabled variants of the public batch NLL factories
 - `batch_gpu_scaling.py`
   - scaling study for the production JAX batch MCMC path
-  - sweeps `n_trials`, `max_d`, `order`, `trunc_num`, `log_space`, and `precision`
+  - sweeps `n_trials`, `max_d`, `order_mid`, `order_last`, `trunc_num`, `log_space`, and `precision`
 
 ## Shared JSON Schema
 
@@ -86,6 +86,15 @@ JAX scripts also support a precision selector:
 
 - `--precision`
   - `float32`, `float64`, or `both` where the script supports precision comparison
+
+Multistage JAX benchmark scripts also support split quadrature controls:
+
+- `--order-mid`
+  - intermediate-stage quadrature order for `q_single` propagation
+- `--order-last`
+  - final-stage quadrature order for `fptd_single` reduction
+- `--order`
+  - legacy compatibility alias that maps to both split orders
 
 Default `pytest` runs now exclude the subprocess benchmark smoke checks. To run
 those explicitly, use:

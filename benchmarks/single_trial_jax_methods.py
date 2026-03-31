@@ -13,12 +13,14 @@ import argparse
 from benchmarks.common import (
     add_common_cli_arguments,
     add_jax_precision_argument,
+    add_quadrature_order_arguments,
     benchmark_jax_scalar_objective,
     format_kib,
     format_rate,
     import_jax,
     make_single_trial_test_data_jax,
     make_metrics,
+    resolve_cli_quadrature_orders,
     resolve_precision_values,
     summarize_gradient_tree,
     summarize_value,
@@ -31,18 +33,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_cli_arguments(parser)
     add_jax_precision_argument(parser, allow_both=True, default="both")
+    add_quadrature_order_arguments(parser)
     parser.add_argument(
         "--d-values",
         type=int,
         nargs="+",
         default=[2, 3, 5, 10],
         help="Stage counts to benchmark.",
-    )
-    parser.add_argument(
-        "--order",
-        type=int,
-        default=30,
-        help="Quadrature order passed to the JAX methods.",
     )
     parser.add_argument(
         "--trunc-num",
@@ -56,15 +53,17 @@ def parse_args():
         default=10,
         help="Number of timing calls after compilation.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.order_mid, args.order_last = resolve_cli_quadrature_orders(args)
+    return args
 
 
-def build_variants(jnp, data, order: int, trunc_num: int):
+def build_variants(jnp, data, order_mid: int, order_last: int, trunc_num: int):
     from efficient_fpt.jax.multi_stage import (
-        compute_addm_fptd_precomputed,
-        compute_addm_fptd_stagescan,
-        compute_heterog_multistage_fptd_precomputed,
-        compute_heterog_multistage_fptd_stagescan,
+        compute_addm_logfptd_precomputed,
+        compute_addm_logfptd_stagescan,
+        compute_heterog_multistage_logfptd_precomputed,
+        compute_heterog_multistage_logfptd_stagescan,
     )
 
     t = data["t"]
@@ -81,7 +80,7 @@ def build_variants(jnp, data, order: int, trunc_num: int):
 
     variants = {}
     for log_space, log_tag in ((False, "normal"), (True, "log")):
-        variants[f"addm/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_fptd_precomputed(
+        variants[f"addm/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_logfptd_precomputed(
             t,
             1,
             0.0,
@@ -95,11 +94,12 @@ def build_variants(jnp, data, order: int, trunc_num: int):
             flag,
             node_arr,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
-        variants[f"addm/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_fptd_stagescan(
+        variants[f"addm/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space: compute_addm_logfptd_stagescan(
             t,
             1,
             0.0,
@@ -113,11 +113,12 @@ def build_variants(jnp, data, order: int, trunc_num: int):
             flag,
             node_arr,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
-        variants[f"multi/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_fptd_precomputed(
+        variants[f"multi/precomputed/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_logfptd_precomputed(
             t,
             1,
             x0,
@@ -129,11 +130,12 @@ def build_variants(jnp, data, order: int, trunc_num: int):
             jnp.full(_shape, -b_),
             jnp.full(_shape, b_),
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
-        variants[f"multi/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_fptd_stagescan(
+        variants[f"multi/stagescan/{log_tag}"] = lambda s, a_, b_, _ls=log_space, _shape=sigma_arr.shape[0]: compute_heterog_multistage_logfptd_stagescan(
             t,
             1,
             x0,
@@ -145,7 +147,8 @@ def build_variants(jnp, data, order: int, trunc_num: int):
             jnp.full(_shape, -b_),
             jnp.full(_shape, b_),
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=_ls,
         )
@@ -171,7 +174,8 @@ def main():
 
             print(
                 f"\n  precision={precision}  d={d}  "
-                f"(order={args.order}, trunc_num={args.trunc_num}, calls={n_calls})"
+                f"(order_mid={args.order_mid}, order_last={args.order_last}, "
+                f"trunc_num={args.trunc_num}, calls={n_calls})"
             )
             print(
                 f"  {'variant':25s}  {'compile(s)':>10s}  {'fwd(us)':>10s}  "
@@ -179,7 +183,13 @@ def main():
                 f"{'grad/s':>10s}  {'fwd temp':>8s}  {'vg temp':>8s}  {'result':>18s}"
             )
 
-            for name, fn in build_variants(jnp, data, args.order, args.trunc_num).items():
+            for name, fn in build_variants(
+                jnp,
+                data,
+                args.order_mid,
+                args.order_last,
+                args.trunc_num,
+            ).items():
                 timed = benchmark_jax_scalar_objective(
                     jax,
                     fn,
@@ -194,7 +204,8 @@ def main():
                     "api_kind": "scalar_objective",
                     "workload": {"d": d},
                     "compute": {
-                        "order": args.order,
+                        "order_mid": args.order_mid,
+                        "order_last": args.order_last,
                         "trunc_num": args.trunc_num,
                         "n_calls": n_calls,
                         "precision": precision,

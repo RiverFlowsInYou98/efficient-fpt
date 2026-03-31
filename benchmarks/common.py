@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+from efficient_fpt._defaults import (
+    DEFAULT_LAST_QUAD_ORDER,
+    DEFAULT_MID_QUAD_ORDER,
+)
+from efficient_fpt.utils import resolve_quadrature_orders
 
 
 BENCHMARK_SCHEMA_VERSION = 2
@@ -62,6 +67,37 @@ def add_jax_precision_argument(
         choices=choices,
         default=default,
         help="JAX precision mode used for this benchmark.",
+    )
+
+
+def add_quadrature_order_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add split quadrature-order CLI arguments plus the legacy alias."""
+    parser.add_argument(
+        "--order-mid",
+        type=int,
+        default=DEFAULT_MID_QUAD_ORDER,
+        help="Intermediate-stage quadrature order used for q_single propagation.",
+    )
+    parser.add_argument(
+        "--order-last",
+        type=int,
+        default=DEFAULT_LAST_QUAD_ORDER,
+        help="Final-stage quadrature order used for fptd_single reduction.",
+    )
+    parser.add_argument(
+        "--order",
+        type=int,
+        default=None,
+        help="Legacy compatibility alias that maps to both split orders.",
+    )
+
+
+def resolve_cli_quadrature_orders(args) -> tuple[int, int]:
+    """Resolve split quadrature orders from parsed benchmark CLI args."""
+    return resolve_quadrature_orders(
+        order_mid=args.order_mid,
+        order_last=args.order_last,
+        order=getattr(args, "order", None),
     )
 
 
