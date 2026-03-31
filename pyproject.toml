@@ -29,6 +29,7 @@ pymc = [
 test = [
     "pytest>=7.0",
     "pytest-xdist",
+    "numpy",
 ]
 all = [
     "scipy", "matplotlib", "jupyter",
@@ -46,11 +47,13 @@ Repository = "https://github.com/RiverFlowsInYou98/efficient-fpt"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m \"not benchmark_smoke\""
+markers = [
+    "benchmark_smoke: benchmark subprocess smoke checks that are excluded from default pytest runs",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-
