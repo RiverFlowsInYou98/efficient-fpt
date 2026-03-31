@@ -4,16 +4,14 @@ import numpy as np
 
 
 def piecewise_const_func(t, mu_array, node_array):
-    """
-    piecewise constant drift rate function, with drift rates `mu_array` and change points `node_array`
+    """Piecewise constant drift rate function.
+
+    Assumes pre-validated inputs (lengths match, node_array strictly
+    increasing with node_array[0] == 0).  Validation is handled by
+    :func:`~efficient_fpt.validation.check_multistage_params` at the
+    model/API level.
     """
     d = len(mu_array)
-    if len(node_array) != d:
-        raise ValueError(f"node_array length {len(node_array)} != mu_array length {d}")
-    if not all(i < j for i, j in zip(node_array, node_array[1:])):
-        raise ValueError("node_array must be strictly increasing")
-    if d >= 2 and node_array[1] <= 0:
-        raise ValueError("node_array[1] must be positive")
     _node_array = np.append(node_array, np.inf)
     return np.piecewise(
         t,
@@ -23,23 +21,15 @@ def piecewise_const_func(t, mu_array, node_array):
 
 
 def piecewise_linear_func(t, a_array, b_array, node_array):
-    """
-    piecewise linear function, with intercepts `a_array`, slopes `b_array` and change points `node_array`
+    """Piecewise linear function.
+
+    Assumes pre-validated inputs (lengths match, node_array strictly
+    increasing with node_array[0] == 0).  Validation is handled by
+    :func:`~efficient_fpt.validation.check_multistage_params` at the
+    model/API level.
     """
     d = len(b_array)
-    if len(a_array) != d:
-        raise ValueError(f"a_array length {len(a_array)} != b_array length {d}")
-    if len(node_array) != d:
-        raise ValueError(f"node_array length {len(node_array)} != b_array length {d}")
-    if not all(i < j for i, j in zip(node_array, node_array[1:])):
-        raise ValueError("node_array must be strictly increasing")
-    if d >= 2 and node_array[1] <= 0:
-        raise ValueError("node_array[1] must be positive")
-
-    # Extend node_array to include boundaries for the piecewise function
     _node_array = np.append(node_array, np.inf)
-
-    # Define the piecewise function
     conds = [(t >= _node_array[i]) & (t < _node_array[i + 1]) for i in range(d)]
     funcs = [
         lambda t, i=i: a_array[i] + b_array[i] * (t - _node_array[i]) for i in range(d)

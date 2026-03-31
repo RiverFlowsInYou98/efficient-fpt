@@ -5,9 +5,10 @@
 
 import numpy as np
 cimport numpy as np
-from libc.math cimport exp, sqrt, pow, M_PI, fabs, log
+from libc.math cimport exp, sqrt, pow, M_PI, fabs
 from libc.stdio cimport fprintf, stderr
 from cython cimport boundscheck, wraparound, cdivision, language_level
+from .utils cimport positive_log
 
 include "_defaults.pxi"
 
@@ -128,3 +129,57 @@ cpdef inline double q_single(double x, double mu, double sigma, double a1, doubl
     a2 = (a2 - x0) / sigma
     b2 = b2 / sigma
     return q_basic(x, mu, a1, b1, a2, b2, T, trunc_num, threshold, adaptive_stopping) / sigma
+
+
+def log_fptd_basic(double t, double mu, double a1, double b1, double a2, double b2, int bdy, int trunc_num=DEFAULT_TRUNC_NUM, double threshold=DEFAULT_THRESHOLD, bint adaptive_stopping=True):
+    """Safe log of :func:`fptd_basic`."""
+    return positive_log(
+        fptd_basic(t, mu, a1, b1, a2, b2, bdy, trunc_num, threshold, adaptive_stopping)
+    )
+
+
+def log_q_basic(double x, double mu, double a1, double b1, double a2, double b2, double T, int trunc_num=DEFAULT_TRUNC_NUM, double threshold=DEFAULT_THRESHOLD, bint adaptive_stopping=True):
+    """Safe log of :func:`q_basic`."""
+    return positive_log(
+        q_basic(x, mu, a1, b1, a2, b2, T, trunc_num, threshold, adaptive_stopping)
+    )
+
+
+def log_fptd_single(double t, double mu, double sigma, double a1, double b1, double a2, double b2, double x0, int bdy, int trunc_num=DEFAULT_TRUNC_NUM, double threshold=DEFAULT_THRESHOLD, bint adaptive_stopping=True):
+    """Safe log of :func:`fptd_single`."""
+    return positive_log(
+        fptd_single(
+            t,
+            mu,
+            sigma,
+            a1,
+            b1,
+            a2,
+            b2,
+            x0,
+            bdy,
+            trunc_num,
+            threshold,
+            adaptive_stopping,
+        )
+    )
+
+
+def log_q_single(double x, double mu, double sigma, double a1, double b1, double a2, double b2, double T, double x0, int trunc_num=DEFAULT_TRUNC_NUM, double threshold=DEFAULT_THRESHOLD, bint adaptive_stopping=True):
+    """Safe log of :func:`q_single`."""
+    return positive_log(
+        q_single(
+            x,
+            mu,
+            sigma,
+            a1,
+            b1,
+            a2,
+            b2,
+            T,
+            x0,
+            trunc_num,
+            threshold,
+            adaptive_stopping,
+        )
+    )

@@ -1,8 +1,15 @@
 import numpy as np
 from .single_stage import fptd_single, q_single
+from .utils import positive_log
 from ..validation import check_multistage_params
-from .._defaults import DEFAULT_QUADRATURE_ORDER, DEFAULT_TRUNC_NUM, DEFAULT_THRESHOLD
+from .._defaults import (
+    DEFAULT_LAST_QUAD_ORDER,
+    DEFAULT_MID_QUAD_ORDER,
+    DEFAULT_TRUNC_NUM,
+    DEFAULT_THRESHOLD,
+)
 from ..quadrature import lgwt_lookup_table
+from ..utils import resolve_quadrature_orders
 
 
 def _logsumexp(a, axis=None):
@@ -23,18 +30,7 @@ def _logsumexp(a, axis=None):
     out = np.where(np.isneginf(max_val), -np.inf, out)
     return np.squeeze(out, axis=axis)
 
-
-def _positive_logs(a):
-    """Return log(a) for positive entries and -inf otherwise, without warnings."""
-    a = np.asarray(a, dtype=np.float64)
-    logs = np.full_like(a, -np.inf, dtype=np.float64)
-    positive = a > 0
-    if np.any(positive):
-        logs[positive] = np.log(a[positive])
-    return logs
-
-
-def compute_homog_multistage_fptds_and_npd(
+def compute_homog_multistage_logfptds_and_lognpd(
     t_grid,
     T,
     x0,
@@ -46,7 +42,9 @@ def compute_homog_multistage_fptds_and_npd(
     b1_array,
     b2_array,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     eps=1e-3,
     trunc_num=DEFAULT_TRUNC_NUM,
     threshold=DEFAULT_THRESHOLD,
@@ -54,8 +52,7 @@ def compute_homog_multistage_fptds_and_npd(
     log_space=False,
 ):
     """
-    Computes the first-passage time density (FPTD) for a multistage drift-diffusion model (DDM)
-    on a specified time grid `t_grid`, for both upper and lower absorbing boundaries.
+    Computes log-FPTDs for a multistage DDM on a specified time grid.
 
     Parameters
     ----------
@@ -92,8 +89,15 @@ def compute_homog_multistage_fptds_and_npd(
         - If a 2D array of shape (2, N), X(0) is a mixture of N point masses.
           where the first row contains weights and the second row contains support points.
 
-    order : int, optional (default=30)
-        Quadrature order used in `lgwt_lookup_table`.
+    order_mid : int, optional (default=20)
+        Quadrature order used for intermediate-stage `q_single` propagation.
+
+    order_last : int, optional (default=30)
+        Quadrature order used for stage-local `fptd_single` reductions.
+
+    order : int, optional
+        Legacy compatibility alias. If provided on its own, it sets both
+        `order_mid` and `order_last` to the same value.
 
     eps : float, optional (default=1e-3)
         Tolerance for ignoring grid points in `t_grid` that are too close to `node_array`,
@@ -115,17 +119,23 @@ def compute_homog_multistage_fptds_and_npd(
 
     Returns
     -------
-    fptd : np.ndarray of shape (3, len(t_grid))
+    logfptd : np.ndarray of shape (3, len(t_grid))
         A matrix where:
         - Row 0: Filtered time grid
-        - Row 1: FPTD values at the upper boundary
-        - Row 2: FPTD values at the lower boundary
+        - Row 1: log-FPTD values at the upper boundary
+        - Row 2: log-FPTD values at the lower boundary
 
     final_state : np.ndarray of shape (2, N)
-        The final (post-last-stage) distribution over the process state.
+        The final (post-last-stage) log distribution over the process state.
         - Row 0: Grid of support points for the process state
-        - Row 1: Corresponding probabilities (subdensity mass) at those points
+        - Row 1: Corresponding log subdensity mass values at those points
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
+
     # Check parameters
     mu_array = mu_array[node_array < T]
     sigma_array = sigma_array[node_array < T]
@@ -143,44 +153,40 @@ def compute_homog_multistage_fptds_and_npd(
     # Initialize
     ub, lb = a1, a2
     if isinstance(x0, np.ndarray) and x0.ndim == 2:
-        ws = x0[0]
-        xs = x0[1]
-        qs = np.ones_like(ws)
+        xs_eval_prev = x0[1]
+        ws_eval_prev = x0[0]
+        qs_eval_prev = np.ones_like(ws_eval_prev)
+        xs_prop_prev = xs_eval_prev
+        ws_prop_prev = ws_eval_prev
+        qs_prop_prev = qs_eval_prev
     elif callable(x0):
-        xs, ws = lgwt_lookup_table(order, lb, ub)
-        qs = x0(xs)
+        xs_eval_prev, ws_eval_prev = lgwt_lookup_table(order_last, lb, ub)
+        qs_eval_prev = x0(xs_eval_prev)
+        xs_prop_prev, ws_prop_prev = lgwt_lookup_table(order_mid, lb, ub)
+        qs_prop_prev = x0(xs_prop_prev)
+    else:
+        raise TypeError("x0 must be either a callable or a 2D point-mass array")
 
-    xs_prev, ws_prev, qs_prev, ub_prev, lb_prev = xs, ws, qs, ub, lb
+    ub_prev, lb_prev = ub, lb
     _node_array = np.concatenate([node_array, [T]])
 
     # skip t that are too close to `node_array` to avoid numerical instability issues
     t_grid, indices, _ = filter_and_group(_node_array, t_grid, epsilon=eps)
-    upper_densities = np.zeros_like(t_grid)
-    lower_densities = np.zeros_like(t_grid)
+    upper_logfptds = np.full_like(t_grid, -np.inf)
+    lower_logfptds = np.full_like(t_grid, -np.inf)
 
     if log_space:
-        # Initialize log-space: log_ws_qs = log(ws * qs)
-        log_ws_qs = _positive_logs(ws_prev * qs_prev)
+        log_ws_qs_eval_prev = positive_log(ws_eval_prev * qs_eval_prev)
+        log_ws_qs_prop_prev = positive_log(ws_prop_prev * qs_prop_prev)
 
     for n in range(d):
         ub += b1_array[n] * (_node_array[n + 1] - _node_array[n])
         lb += b2_array[n] * (_node_array[n + 1] - _node_array[n])
-
-        xs, ws = lgwt_lookup_table(order, lb, ub)
-        P = q_single(
-            xs[:, np.newaxis],
-            mu_array[n],
-            sigma_array[n],
-            ub_prev,
-            b1_array[n],
-            lb_prev,
-            b2_array[n],
-            _node_array[n + 1] - _node_array[n],
-            xs_prev,
-            trunc_num=trunc_num,
-            threshold=threshold,
-            adaptive_stopping=adaptive_stopping,
-        )
+        xs_prop_src = xs_prop_prev
+        ws_prop_src = ws_prop_prev
+        qs_prop_src = qs_prop_prev
+        if log_space:
+            log_ws_qs_prop_src = log_ws_qs_prop_prev
 
         if len(indices[n]) > 0:
             U = fptd_single(
@@ -191,7 +197,7 @@ def compute_homog_multistage_fptds_and_npd(
                 b1_array[n],
                 lb_prev,
                 b2_array[n],
-                xs_prev,
+                xs_eval_prev,
                 1,
                 trunc_num=trunc_num,
                 threshold=threshold,
@@ -205,7 +211,7 @@ def compute_homog_multistage_fptds_and_npd(
                 b1_array[n],
                 lb_prev,
                 b2_array[n],
-                xs_prev,
+                xs_eval_prev,
                 -1,
                 trunc_num=trunc_num,
                 threshold=threshold,
@@ -213,30 +219,87 @@ def compute_homog_multistage_fptds_and_npd(
             )
             if log_space:
                 # log-space accumulation for FPTD
-                log_U = _positive_logs(U)
-                log_L = _positive_logs(L)
-                upper_densities[indices[n]] = np.exp(
-                    _logsumexp(log_U + log_ws_qs[np.newaxis, :], axis=1)
+                log_U = positive_log(U)
+                log_L = positive_log(L)
+                upper_logfptds[indices[n]] = _logsumexp(
+                    log_U + log_ws_qs_eval_prev[np.newaxis, :], axis=1
                 )
-                lower_densities[indices[n]] = np.exp(
-                    _logsumexp(log_L + log_ws_qs[np.newaxis, :], axis=1)
+                lower_logfptds[indices[n]] = _logsumexp(
+                    log_L + log_ws_qs_eval_prev[np.newaxis, :], axis=1
                 )
             else:
-                upper_densities[indices[n]] = np.sum(ws_prev * qs_prev * U, axis=1)
-                lower_densities[indices[n]] = np.sum(ws_prev * qs_prev * L, axis=1)
+                upper_logfptds[indices[n]] = positive_log(
+                    np.sum(ws_eval_prev * qs_eval_prev * U, axis=1)
+                )
+                lower_logfptds[indices[n]] = positive_log(
+                    np.sum(ws_eval_prev * qs_eval_prev * L, axis=1)
+                )
+
+        xs_prop, ws_prop = lgwt_lookup_table(order_mid, lb, ub)
+        P_prop = q_single(
+            xs_prop[:, np.newaxis],
+            mu_array[n],
+            sigma_array[n],
+            ub_prev,
+            b1_array[n],
+            lb_prev,
+            b2_array[n],
+            _node_array[n + 1] - _node_array[n],
+            xs_prop_src,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            adaptive_stopping=adaptive_stopping,
+        )
 
         if log_space:
-            log_P = _positive_logs(P)
-            # log_qs[i] = logsumexp_j(log_P[i,j] + log_ws_qs[j])
-            log_qs = _logsumexp(log_P + log_ws_qs[np.newaxis, :], axis=1)
-            log_ws = _positive_logs(ws)
-            log_ws_qs = log_ws + log_qs
-            qs = np.exp(log_qs)
+            log_P_prop = positive_log(P_prop)
+            log_qs_prop = _logsumexp(
+                log_P_prop + log_ws_qs_prop_src[np.newaxis, :], axis=1
+            )
+            log_ws_qs_prop_prev = positive_log(ws_prop) + log_qs_prop
+            qs_prop_prev = log_qs_prop
         else:
-            qs = np.sum(ws_prev * qs_prev * P, axis=1)
-        xs_prev, ws_prev, qs_prev, ub_prev, lb_prev = xs, ws, qs, ub, lb
+            qs_prop_prev = np.sum(ws_prop_src * qs_prop_src * P_prop, axis=1)
 
-    return np.vstack([t_grid, upper_densities, lower_densities]), np.vstack([xs, qs])
+        xs_prop_prev, ws_prop_prev = xs_prop, ws_prop
+
+        if n < d - 1:
+            xs_eval, ws_eval = lgwt_lookup_table(order_last, lb, ub)
+            P_eval = q_single(
+                xs_eval[:, np.newaxis],
+                mu_array[n],
+                sigma_array[n],
+                ub_prev,
+                b1_array[n],
+                lb_prev,
+                b2_array[n],
+                _node_array[n + 1] - _node_array[n],
+                xs_prop_src,
+                trunc_num=trunc_num,
+                threshold=threshold,
+                adaptive_stopping=adaptive_stopping,
+            )
+
+            if log_space:
+                log_P_eval = positive_log(P_eval)
+                log_qs_eval = _logsumexp(
+                    log_P_eval + log_ws_qs_prop_src[np.newaxis, :], axis=1
+                )
+                log_ws_qs_eval_prev = positive_log(ws_eval) + log_qs_eval
+                qs_eval_prev = log_qs_eval
+            else:
+                qs_eval_prev = np.sum(ws_prop_src * qs_prop_src * P_eval, axis=1)
+
+            xs_eval_prev, ws_eval_prev = xs_eval, ws_eval
+
+        ub_prev, lb_prev = ub, lb
+
+    log_qs_out = qs_prop_prev if log_space else positive_log(qs_prop_prev)
+
+    return (
+        np.vstack([t_grid, upper_logfptds, lower_logfptds]),
+        np.vstack([xs_prop_prev, log_qs_out]),
+    )
 
 
 def filter_and_group(a, x, epsilon=1e-3):
@@ -284,10 +347,11 @@ def filter_and_group(a, x, epsilon=1e-3):
     filtered_x = x[keep]
     filtered_bins = bin_idx[keep]
 
-    classified_indices = [[] for _ in range(d)]
-    classified_x = [[] for _ in range(d)]
-    for idx, (val, b) in enumerate(zip(filtered_x, filtered_bins)):
-        classified_indices[b].append(idx)
-        classified_x[b].append(val)
+    classified_indices = []
+    classified_x = []
+    for i in range(d):
+        mask = filtered_bins == i
+        classified_indices.append(np.where(mask)[0])
+        classified_x.append(filtered_x[mask])
 
     return filtered_x, classified_indices, classified_x

@@ -7,6 +7,8 @@ GPU acceleration and automatic differentiation compatibility.
 import jax.numpy as jnp
 from jax import vmap
 
+from .utils import get_jax_dtype
+
 
 def _build_addm_mu_array(eta, kappa, r1, r2, flag, d, max_d, dtype):
     """Return the padded single-trial ADDM drift array from user-facing covariates."""
@@ -21,7 +23,7 @@ def _build_addm_mu_array(eta, kappa, r1, r2, flag, d, max_d, dtype):
 
 def _build_addm_mu_array_data(eta, kappa, r1_data, r2_data, flag_data, d_data, max_d):
     """Build the padded addm drift array from user-facing batch covariates."""
-    dtype = jnp.result_type(r1_data, r2_data, jnp.float64)
+    dtype = jnp.result_type(r1_data, r2_data, get_jax_dtype())
     trial_mu = vmap(
         lambda r1, r2, flag, d: _build_addm_mu_array(
             eta, kappa, r1, r2, flag, d, max_d, dtype,

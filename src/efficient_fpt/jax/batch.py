@@ -1,6 +1,6 @@
-"""Batched aDDM likelihood and NLL computation using JAX kernels.
+"""Batched aDDM log-likelihood and NLL computation using JAX kernels.
 
-This module contains the JAX batch layer for aDDM likelihoods and NLLs. It
+This module contains the JAX batch layer for aDDM log-likelihoods and NLLs. It
 exposes two explicit batch methods:
 
 - a legacy baseline that vmaps the production single-trial kernel in
@@ -15,10 +15,10 @@ These batch variants now sit alongside the single-trial variants in
   kernels
 - ``jax.multi_stage.compute_*_stagescan``: public single-trial stage-scan
   kernels
-- ``jax.batch.compute_addm_likelihoods_batchvmap``: legacy batch baseline
-- ``jax.batch.compute_addm_likelihoods_batchscan``: production batch kernel
-- ``jax.batch.compute_addm_likelihoods``: alias to
-  ``compute_addm_likelihoods_batchscan``
+- ``jax.batch.compute_addm_loglikelihoods_batchvmap``: legacy batch baseline
+- ``jax.batch.compute_addm_loglikelihoods_batchscan``: production batch kernel
+- ``jax.batch.compute_addm_loglikelihoods``: alias to
+  ``compute_addm_loglikelihoods_batchscan``
 - ``jax.batch.make_addm_nll_function_batchvmap``: legacy optimizer closure
 - ``jax.batch.make_addm_nll_function_batchscan``: production optimizer closure
 - ``jax.batch.make_addm_nll_function``: alias to
@@ -27,8 +27,9 @@ These batch variants now sit alongside the single-trial variants in
 There is currently no batched kernel that precomputes *all* stage transition
 matrices for the general current batch API up front. That design is possible
 in principle, but because stage drifts and stage schedules vary by trial, the
-fully general transition tensor would scale roughly like
-``(batch_size, max_d - 2, order, order)``.
+fully general mid-stage transition tensor would scale roughly like
+``(batch_size, max_d - 3, order_mid, order_mid)``, plus a separate
+rectangular final transition into the ``order_last`` grid.
 
 JAX uses a fixed-length series controlled only by ``trunc_num``. There is no
 ``adaptive_stopping`` or ``threshold`` option in this backend.
@@ -42,10 +43,19 @@ from jax import jit, lax, remat, vmap
 from jax.scipy.special import logsumexp
 
 from .addm_helpers import _build_addm_mu_array_data
-from .multi_stage import _to_log_space, compute_addm_fptd
-from .single_stage import fptd_single, q_single
-from .utils import get_gauss_legendre_ref, _DUMMY_STAGE_DURATION
-from .._defaults import DEFAULT_QUADRATURE_ORDER, DEFAULT_TRUNC_NUM
+from .multi_stage import (
+    compute_addm_logfptd,
+    _reduce_final_stage_fptds,
+    _symmetric_stage_grid,
+)
+from .single_stage import fptd_single, q_single, log_fptd_single
+from .utils import get_gauss_legendre_ref, _DUMMY_STAGE_DURATION, positive_log
+from .._defaults import (
+    DEFAULT_LAST_QUAD_ORDER,
+    DEFAULT_MID_QUAD_ORDER,
+    DEFAULT_TRUNC_NUM,
+)
+from ..utils import resolve_quadrature_orders
 
 
 # ---------------------------------------------------------------------------
@@ -53,57 +63,81 @@ from .._defaults import DEFAULT_QUADRATURE_ORDER, DEFAULT_TRUNC_NUM
 # ---------------------------------------------------------------------------
 
 
-def _warn_invalid_likelihoods(likelihoods):
-    """Emit deterministic warnings for skipped trial likelihoods.
+def _warn_invalid_loglikelihoods(loglikelihoods):
+    """Emit deterministic warnings for bad trial log-likelihoods.
 
     Parameters
     ----------
-    likelihoods : array-like, shape (n_trials,)
-        Per-trial likelihood values. Exact zeros and invalid values trigger the
-        same warning messages used by the other backends.
+    loglikelihoods : array-like, shape (n_trials,)
+        Per-trial log-likelihood values. ``-inf`` and invalid values trigger
+        deterministic warnings shared with the other backends.
+
+    Notes
+    -----
+    This helper intentionally avoids ``np.asarray(loglikelihoods)`` on the
+    full vector, which would force an unnecessary host transfer for large
+    device-resident batches. Instead, it computes the bad-trial indices on the
+    device and transfers only those compact index arrays to Python.
     """
-    likelihoods_np = np.ravel(np.asarray(likelihoods))
-    for idx, value in enumerate(likelihoods_np):
-        if value == 0.0:
-            warnings.warn(
-                f"trial {idx} outputs 0 likelihood, skipped",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        elif not np.isfinite(value) or value < 0.0:
-            warnings.warn(
-                f"trial {idx} outputs invalid likelihood, skipped",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+    neginf_mask = jnp.isneginf(loglikelihoods)
+    invalid_mask = ~(jnp.isfinite(loglikelihoods) | neginf_mask)
+
+    neginf_idx = np.asarray(jnp.nonzero(neginf_mask)[0]).ravel()
+    invalid_idx = np.asarray(jnp.nonzero(invalid_mask)[0]).ravel()
+
+    for idx in neginf_idx:
+        warnings.warn(
+            f"trial {int(idx)} outputs -inf log-likelihood",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    for idx in invalid_idx:
+        warnings.warn(
+            f"trial {int(idx)} outputs invalid log-likelihood",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
-def _reduce_addm_likelihoods_to_nll(likelihoods, reduce="mean", warn=True):
-    """Reduce a likelihood vector to a mean or summed negative log-likelihood.
-
-    Invalid trials are skipped using the shared project rule:
-
-    - valid if finite and strictly positive
-    - skipped if zero, negative, or non-finite
-    - return ``NaN`` if every trial is skipped
+def _reduce_addm_loglikelihoods_to_nll(
+    loglikelihoods, reduce="mean", invalid_policy="inf", warn=True
+):
+    """Reduce a log-likelihood vector to a mean or summed negative log-likelihood.
 
     Parameters
     ----------
-    likelihoods : jax.Array, shape (n_trials,)
-        Per-trial likelihood values.
+    loglikelihoods : jax.Array, shape (n_trials,)
+        Per-trial log-likelihood values.
     reduce : {"mean", "sum"}, optional
         Reduction to apply after filtering invalid trials.
+    invalid_policy : {"inf", "warn"}, optional
+        ``"inf"`` propagates ``-inf`` trials to ``+inf`` NLL and invalid
+        trials to ``NaN``. ``"warn"`` emits warnings and skips all non-finite
+        trials.
     warn : bool, optional
-        Whether to emit deterministic Python warnings for skipped trials.
+        Whether to emit deterministic Python warnings for bad trials.
     """
-    valid = jnp.isfinite(likelihoods) & (likelihoods > 0)
+    finite = jnp.isfinite(loglikelihoods)
+    neginf = jnp.isneginf(loglikelihoods)
+    invalid = ~(finite | neginf)
     if warn:
-        _warn_invalid_likelihoods(likelihoods)
+        _warn_invalid_loglikelihoods(loglikelihoods)
 
-    safe_likelihoods = jnp.where(valid, likelihoods, 1.0)
-    losses = jnp.where(valid, -jnp.log(safe_likelihoods), 0.0)
+    losses = jnp.where(finite, -loglikelihoods, 0.0)
     total_loss = jnp.sum(losses)
-    num_valid = jnp.sum(valid.astype(jnp.int32))
+    num_valid = jnp.sum(finite.astype(jnp.int32))
+
+    if invalid_policy == "inf":
+        reduced = total_loss if reduce == "sum" else total_loss / num_valid
+        reduced = jnp.where(num_valid > 0, reduced, jnp.nan)
+        reduced = jnp.where(jnp.any(neginf), jnp.inf, reduced)
+        return jnp.where(jnp.any(invalid), jnp.nan, reduced)
+
+    if invalid_policy != "warn":
+        raise ValueError(
+            f"invalid_policy must be 'inf' or 'warn', got {invalid_policy!r}"
+        )
+
     if reduce == "sum":
         return jnp.where(num_valid > 0, total_loss, jnp.nan)
     return jnp.where(num_valid > 0, total_loss / num_valid, jnp.nan)
@@ -112,6 +146,45 @@ def _reduce_addm_likelihoods_to_nll(likelihoods, reduce="mean", warn=True):
 # ---------------------------------------------------------------------------
 # Batched schedule builders
 # ---------------------------------------------------------------------------
+
+
+def _batch_addm_first_stage_to_grid(
+    xs_target,
+    ws_target,
+    *,
+    mu0_data,
+    sigma,
+    a,
+    upper_slope0_data,
+    lower_slope0_data,
+    stage_duration0_data,
+    x0,
+    trunc_num,
+    log_space,
+):
+    """Initialize batched first-stage weighted alive-state mass on a grid."""
+    pv_init = vmap(
+        lambda xs, mu, upper_slope, lower_slope, dt: q_single(
+            xs,
+            mu,
+            sigma,
+            a,
+            upper_slope,
+            -a,
+            lower_slope,
+            dt,
+            x0,
+            trunc_num=trunc_num,
+        )
+    )(
+        xs_target,
+        mu0_data,
+        upper_slope0_data,
+        lower_slope0_data,
+        stage_duration0_data,
+    )
+    ws_pv = ws_target * pv_init
+    return positive_log(ws_pv) if log_space else ws_pv
 
 
 def _safe_stage_durations_batch(sacc_array_data, d_data):
@@ -246,7 +319,7 @@ def _effective_addm_batch_schedule(sacc_array_data, d_data, a, b):
 # ---------------------------------------------------------------------------
 
 
-def compute_addm_likelihoods_batchvmap(
+def compute_addm_loglikelihoods_batchvmap(
     rt_data,
     choice_data,
     eta,
@@ -261,17 +334,19 @@ def compute_addm_likelihoods_batchvmap(
     sacc_array_data,
     d_data,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
     use_remat=False,
 ):
-    """Legacy batch baseline: vmap over the scalar ADDM kernel.
+    """Legacy batch baseline: vmap over the scalar ADDM log-kernel.
 
     Notes
     -----
     This is the simplest batch implementation: it vmaps the public
-    single-trial production kernel ``compute_addm_fptd`` over trials. Since the
+    single-trial production kernel ``compute_addm_logfptd`` over trials. Since the
     single-trial production kernel in ``jax.multi_stage`` already precomputes
     stage transition matrices per trial, this path should be thought of as
     "batch by vmapping the single-trial precomputed kernel".
@@ -287,8 +362,14 @@ def compute_addm_likelihoods_batchvmap(
     kernel to trade extra compute for lower reverse-mode memory use.
     """
 
-    def single_trial_likelihood(rt, choice, r1, r2, flag, sacc_array, d):
-        return compute_addm_fptd(
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
+
+    def single_trial_loglikelihood(rt, choice, r1, r2, flag, sacc_array, d):
+        return compute_addm_logfptd(
             rt,
             choice,
             eta,
@@ -302,20 +383,21 @@ def compute_addm_likelihoods_batchvmap(
             flag,
             sacc_array,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
         )
 
     if use_remat:
-        single_trial_likelihood = remat(single_trial_likelihood)
+        single_trial_loglikelihood = remat(single_trial_loglikelihood)
 
-    return vmap(single_trial_likelihood, in_axes=(0, 0, 0, 0, 0, 0, 0))(
+    return vmap(single_trial_loglikelihood, in_axes=(0, 0, 0, 0, 0, 0, 0))(
         rt_data, choice_data, r1_data, r2_data, flag_data, sacc_array_data, d_data
     )
 
 
-def _compute_addm_likelihoods_batchscan_core(
+def _compute_addm_loglikelihoods_batchscan_core(
     rt_data,
     choice_data,
     mu_array_data,
@@ -326,12 +408,13 @@ def _compute_addm_likelihoods_batchscan_core(
     b,
     x0,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
     use_remat=False,
 ):
-    """Compute batched aDDM likelihoods with a dedicated stage-scan kernel.
+    """Compute batched aDDM log-likelihoods with a dedicated stage-scan kernel.
 
     Parameters
     ----------
@@ -346,8 +429,9 @@ def _compute_addm_likelihoods_batchscan_core(
         Number of valid stages in each trial.
     sigma, a, b, x0 : float
         Shared aDDM parameters for the batch.
-    order, trunc_num : int, optional
-        Quadrature order and fixed single-stage truncation length.
+    order_mid, order_last, trunc_num : int, optional
+        Intermediate-stage quadrature order, final-stage quadrature order, and
+        fixed single-stage truncation length.
     log_space : bool, optional
         Whether to propagate the alive-state mass in log space.
     use_remat : bool, optional
@@ -357,12 +441,12 @@ def _compute_addm_likelihoods_batchscan_core(
     Returns
     -------
     jax.Array, shape (n_trials,)
-        Per-trial likelihoods.
+        Per-trial log-likelihoods.
 
     Notes
     -----
     This is the main batched runtime kernel. It replaces the older
-    ``vmap(compute_addm_fptd)`` baseline with a dedicated stage-wise batched
+    ``vmap(compute_addm_logfptd)`` baseline with a dedicated stage-wise batched
     scan that carries all trials together through the same quadrature updates.
 
     Unlike the single-trial production kernel in ``jax.multi_stage``, this
@@ -378,18 +462,18 @@ def _compute_addm_likelihoods_batchscan_core(
       precompute all stage transitions for one trial
     - ``jax.multi_stage.compute_*_stagescan``: single-trial stage-scan,
       compute transitions inside ``lax.scan``
-    - ``compute_addm_likelihoods_batchvmap``: legacy batch baseline, vmap the
+    - ``compute_addm_loglikelihoods_batchvmap``: legacy batch baseline, vmap the
       single-trial production path over trials
-    - ``compute_addm_likelihoods_batchscan``: production batch kernel, compute
+    - ``compute_addm_loglikelihoods_batchscan``: production batch kernel, compute
       batched transitions on the fly inside one shared scan
     """
-    # Reference Gauss-Legendre quadrature on [-1, 1].
-    x_ref, w_ref = get_gauss_legendre_ref(order)
+    x_ref_mid, w_ref_mid = get_gauss_legendre_ref(order_mid)
+    x_ref_last, w_ref_last = get_gauss_legendre_ref(order_last)
 
     batch_size, max_d = mu_array_data.shape
     # Handle d == 1 trials directly through the single-stage kernel so the
     # multistage recurrence only needs to serve the true multistage cases.
-    upper_single = fptd_single(
+    upper_single = log_fptd_single(
         rt_data,
         mu_array_data[:, 0],
         sigma,
@@ -401,7 +485,7 @@ def _compute_addm_likelihoods_batchscan_core(
         1,
         trunc_num=trunc_num,
     )
-    lower_single = fptd_single(
+    lower_single = log_fptd_single(
         rt_data,
         mu_array_data[:, 0],
         sigma,
@@ -417,8 +501,8 @@ def _compute_addm_likelihoods_batchscan_core(
     if max_d < 2:
         return single_stage
 
-    # Build per-trial stage schedules and place the first interface quadrature
-    # grid. xs_init / ws_init have shape (n_trials, order).
+    # Build per-trial stage schedules once, then organize the batched recurrence
+    # into explicit first/middle/last-stage steps.
     (
         safe_stage_duration_array_data,
         upper_slope_array_data,
@@ -426,190 +510,232 @@ def _compute_addm_likelihoods_batchscan_core(
         a_starts_data,
     ) = _effective_addm_batch_schedule(sacc_array_data, d_data, a, b)
 
-    a_1 = a_starts_data[:, 1]
-    xs_init = x_ref[None, :] * a_1[:, None]
-    ws_init = w_ref[None, :] * a_1[:, None]
+    def first_stage_batch():
+        a_1 = a_starts_data[:, 1]
+        xs_init_mid, ws_init_mid = _symmetric_stage_grid(x_ref_mid, w_ref_mid, a_1)
+        xs_init_last, ws_init_last = _symmetric_stage_grid(
+            x_ref_last, w_ref_last, a_1
+        )
+        ws_pv_init_mid = _batch_addm_first_stage_to_grid(
+            xs_init_mid,
+            ws_init_mid,
+            mu0_data=mu_array_data[:, 0],
+            sigma=sigma,
+            a=a,
+            upper_slope0_data=upper_slope_array_data[:, 0],
+            lower_slope0_data=lower_slope_array_data[:, 0],
+            stage_duration0_data=safe_stage_duration_array_data[:, 0],
+            x0=x0,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        ws_pv_init_last = _batch_addm_first_stage_to_grid(
+            xs_init_last,
+            ws_init_last,
+            mu0_data=mu_array_data[:, 0],
+            sigma=sigma,
+            a=a,
+            upper_slope0_data=upper_slope_array_data[:, 0],
+            lower_slope0_data=lower_slope_array_data[:, 0],
+            stage_duration0_data=safe_stage_duration_array_data[:, 0],
+            x0=x0,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return xs_init_mid, ws_pv_init_mid, ws_pv_init_last
 
-    # Propagate x0 through stage 0 for every trial to reach the first
-    # interface quadrature grid.
-    pv_init = vmap(
-        lambda xs, mu, upper_slope, lower_slope, dt: q_single(
-            xs,
-            mu,
+    def middle_stages_batch(carry):
+        if log_space:
+
+            def stage_step(carry, stage_idx):
+                xs_prev, log_ws_pv_prev = carry
+                a_prev = a_starts_data[:, stage_idx]
+                a_curr = a_starts_data[:, stage_idx + 1]
+                xs = x_ref_mid[None, :] * a_curr[:, None]
+                ws = w_ref_mid[None, :] * a_curr[:, None]
+
+                P = vmap(
+                    lambda xs_row, mu, a_prev_val, upper_slope, lower_slope, dt, xs_prev_row: q_single(
+                        xs_row[:, None],
+                        mu,
+                        sigma,
+                        a_prev_val,
+                        upper_slope,
+                        -a_prev_val,
+                        lower_slope,
+                        dt,
+                        xs_prev_row[None, :],
+                        trunc_num=trunc_num,
+                    )
+                )(
+                    xs,
+                    mu_array_data[:, stage_idx],
+                    a_prev,
+                    upper_slope_array_data[:, stage_idx],
+                    lower_slope_array_data[:, stage_idx],
+                    safe_stage_duration_array_data[:, stage_idx],
+                    xs_prev,
+                )
+
+                log_pv_new = logsumexp(
+                    positive_log(P) + log_ws_pv_prev[:, None, :], axis=2
+                )
+                log_ws_pv_new = positive_log(ws) + log_pv_new
+                active = stage_idx < (d_data - 2)
+                xs_out = jnp.where(active[:, None], xs, xs_prev)
+                log_ws_pv_out = jnp.where(
+                    active[:, None], log_ws_pv_new, log_ws_pv_prev
+                )
+                return (xs_out, log_ws_pv_out), None
+
+        else:
+
+            def stage_step(carry, stage_idx):
+                xs_prev, ws_pv_prev = carry
+                a_prev = a_starts_data[:, stage_idx]
+                a_curr = a_starts_data[:, stage_idx + 1]
+                xs = x_ref_mid[None, :] * a_curr[:, None]
+                ws = w_ref_mid[None, :] * a_curr[:, None]
+
+                P = vmap(
+                    lambda xs_row, mu, a_prev_val, upper_slope, lower_slope, dt, xs_prev_row: q_single(
+                        xs_row[:, None],
+                        mu,
+                        sigma,
+                        a_prev_val,
+                        upper_slope,
+                        -a_prev_val,
+                        lower_slope,
+                        dt,
+                        xs_prev_row[None, :],
+                        trunc_num=trunc_num,
+                    )
+                )(
+                    xs,
+                    mu_array_data[:, stage_idx],
+                    a_prev,
+                    upper_slope_array_data[:, stage_idx],
+                    lower_slope_array_data[:, stage_idx],
+                    safe_stage_duration_array_data[:, stage_idx],
+                    xs_prev,
+                )
+
+                pv_new = jnp.matmul(P, ws_pv_prev[..., None]).squeeze(axis=-1)
+                ws_pv_new = ws * pv_new
+                active = stage_idx < (d_data - 2)
+                xs_out = jnp.where(active[:, None], xs, xs_prev)
+                ws_pv_out = jnp.where(active[:, None], ws_pv_new, ws_pv_prev)
+                return (xs_out, ws_pv_out), None
+
+        if use_remat:
+            stage_step = remat(stage_step)
+
+        if max_d > 3:
+            carry, _ = lax.scan(stage_step, carry, jnp.arange(1, max_d - 2))
+        return carry
+
+    def last_stage_batch(xs_mid_final, ws_pv_mid_final, ws_pv_init_last):
+        safe_d_idx = jnp.minimum(d_data - 1, max_d - 1)
+        sacc_final = jnp.take_along_axis(
+            sacc_array_data, safe_d_idx[:, None], axis=1
+        ).squeeze(axis=1)
+        a_final = jnp.take_along_axis(
+            a_starts_data, safe_d_idx[:, None], axis=1
+        ).squeeze(axis=1)
+        mu_final = jnp.take_along_axis(
+            mu_array_data, safe_d_idx[:, None], axis=1
+        ).squeeze(axis=1)
+        t_in_final_stage = rt_data - sacc_final
+        xs_final, ws_final = _symmetric_stage_grid(x_ref_last, w_ref_last, a_final)
+
+        last_q_idx = jnp.maximum(safe_d_idx - 1, 0)
+        mu_last_q = jnp.take_along_axis(
+            mu_array_data, last_q_idx[:, None], axis=1
+        ).squeeze(axis=1)
+        a_prev_last = jnp.take_along_axis(
+            a_starts_data, last_q_idx[:, None], axis=1
+        ).squeeze(axis=1)
+        upper_last_q = jnp.take_along_axis(
+            upper_slope_array_data, last_q_idx[:, None], axis=1
+        ).squeeze(axis=1)
+        lower_last_q = jnp.take_along_axis(
+            lower_slope_array_data, last_q_idx[:, None], axis=1
+        ).squeeze(axis=1)
+        dt_last_q = jnp.take_along_axis(
+            safe_stage_duration_array_data, last_q_idx[:, None], axis=1
+        ).squeeze(axis=1)
+
+        P_last = vmap(
+            lambda xs_last_row, mu, a_prev_val, upper_slope, lower_slope, dt, xs_prev_row: q_single(
+                xs_last_row[:, None],
+                mu,
+                sigma,
+                a_prev_val,
+                upper_slope,
+                -a_prev_val,
+                lower_slope,
+                dt,
+                xs_prev_row[None, :],
+                trunc_num=trunc_num,
+            )
+        )(
+            xs_final,
+            mu_last_q,
+            a_prev_last,
+            upper_last_q,
+            lower_last_q,
+            dt_last_q,
+            xs_mid_final,
+        )
+
+        if log_space:
+            ws_pv_last = positive_log(ws_final) + logsumexp(
+                positive_log(P_last) + ws_pv_mid_final[:, None, :], axis=2
+            )
+        else:
+            ws_pv_last = ws_final * jnp.matmul(
+                P_last, ws_pv_mid_final[..., None]
+            ).squeeze(axis=-1)
+
+        ws_pv_final = jnp.where((d_data > 2)[:, None], ws_pv_last, ws_pv_init_last)
+
+        upper = fptd_single(
+            t_in_final_stage[:, None],
+            mu_final[:, None],
             sigma,
-            a,
-            upper_slope,
-            -a,
-            lower_slope,
-            dt,
-            x0,
+            a_final[:, None],
+            -b,
+            -a_final[:, None],
+            b,
+            xs_final,
+            1,
             trunc_num=trunc_num,
         )
-    )(
-        xs_init,
-        mu_array_data[:, 0],
-        upper_slope_array_data[:, 0],
-        lower_slope_array_data[:, 0],
-        safe_stage_duration_array_data[:, 0],
-    )
+        lower = fptd_single(
+            t_in_final_stage[:, None],
+            mu_final[:, None],
+            sigma,
+            a_final[:, None],
+            -b,
+            -a_final[:, None],
+            b,
+            xs_final,
+            -1,
+            trunc_num=trunc_num,
+        )
+        fptds = jnp.where(choice_data[:, None] == 1, upper, lower)
+        return _reduce_final_stage_fptds(
+            fptds, ws_pv_final, log_space, axis=1
+        )
 
-    if log_space:
-        # Carry = (current interface nodes, log(weighted alive-state mass)).
-        carry = (xs_init, _to_log_space(ws_init * pv_init))
-
-        def stage_step(carry, stage_idx):
-            xs_prev, log_ws_pv_prev = carry
-
-            # Build the next interface grid for every trial, then compute the
-            # stage transition matrix P for each trial on the fly.
-            a_prev = a_starts_data[:, stage_idx]
-            a_curr = a_starts_data[:, stage_idx + 1]
-            xs = x_ref[None, :] * a_curr[:, None]
-            ws = w_ref[None, :] * a_curr[:, None]
-
-            P = vmap(
-                lambda xs_row, mu, a_prev_val, upper_slope, lower_slope, dt, xs_prev_row: q_single(
-                    xs_row[:, None],
-                    mu,
-                    sigma,
-                    a_prev_val,
-                    upper_slope,
-                    -a_prev_val,
-                    lower_slope,
-                    dt,
-                    xs_prev_row[None, :],
-                    trunc_num=trunc_num,
-                )
-            )(
-                xs,
-                mu_array_data[:, stage_idx],
-                a_prev,
-                upper_slope_array_data[:, stage_idx],
-                lower_slope_array_data[:, stage_idx],
-                safe_stage_duration_array_data[:, stage_idx],
-                xs_prev,
-            )
-
-            log_pv_new = logsumexp(
-                _to_log_space(P) + log_ws_pv_prev[:, None, :], axis=2
-            )
-            log_ws_pv_new = _to_log_space(ws) + log_pv_new
-            active = stage_idx < (d_data - 1)
-
-            xs_out = jnp.where(active[:, None], xs, xs_prev)
-            log_ws_pv_out = jnp.where(active[:, None], log_ws_pv_new, log_ws_pv_prev)
-            return (xs_out, log_ws_pv_out), None
-
-        if use_remat:
-            stage_step = remat(stage_step)
-
-        if max_d > 2:
-            carry, _ = lax.scan(stage_step, carry, jnp.arange(1, max_d - 1))
-
-        xs_final, log_ws_pv_final = carry
-    else:
-        # Carry = (current interface nodes, weighted alive-state mass).
-        carry = (xs_init, ws_init * pv_init)
-
-        def stage_step(carry, stage_idx):
-            xs_prev, ws_pv_prev = carry
-
-            # Build the next interface grid for every trial, then compute the
-            # stage transition matrix P for each trial on the fly.
-            a_prev = a_starts_data[:, stage_idx]
-            a_curr = a_starts_data[:, stage_idx + 1]
-            xs = x_ref[None, :] * a_curr[:, None]
-            ws = w_ref[None, :] * a_curr[:, None]
-
-            P = vmap(
-                lambda xs_row, mu, a_prev_val, upper_slope, lower_slope, dt, xs_prev_row: q_single(
-                    xs_row[:, None],
-                    mu,
-                    sigma,
-                    a_prev_val,
-                    upper_slope,
-                    -a_prev_val,
-                    lower_slope,
-                    dt,
-                    xs_prev_row[None, :],
-                    trunc_num=trunc_num,
-                )
-            )(
-                xs,
-                mu_array_data[:, stage_idx],
-                a_prev,
-                upper_slope_array_data[:, stage_idx],
-                lower_slope_array_data[:, stage_idx],
-                safe_stage_duration_array_data[:, stage_idx],
-                xs_prev,
-            )
-
-            pv_new = jnp.matmul(P, ws_pv_prev[..., None]).squeeze(axis=-1)
-            ws_pv_new = ws * pv_new
-            active = stage_idx < (d_data - 1)
-
-            xs_out = jnp.where(active[:, None], xs, xs_prev)
-            ws_pv_out = jnp.where(active[:, None], ws_pv_new, ws_pv_prev)
-            return (xs_out, ws_pv_out), None
-
-        if use_remat:
-            stage_step = remat(stage_step)
-
-        if max_d > 2:
-            carry, _ = lax.scan(stage_step, carry, jnp.arange(1, max_d - 1))
-
-        xs_final, ws_pv_final = carry
-
-    # Pick the true final stage for each trial, evaluate the observed
-    # boundary-hit density there, then reduce over the final-stage latent
-    # start-position quadrature grid.
-    safe_d_idx = jnp.minimum(d_data - 1, max_d - 1)
-    sacc_final = jnp.take_along_axis(
-        sacc_array_data, safe_d_idx[:, None], axis=1
-    ).squeeze(axis=1)
-    a_final = jnp.take_along_axis(a_starts_data, safe_d_idx[:, None], axis=1).squeeze(
-        axis=1
-    )
-    mu_final = jnp.take_along_axis(mu_array_data, safe_d_idx[:, None], axis=1).squeeze(
-        axis=1
-    )
-    t_in_final_stage = rt_data - sacc_final
-
-    upper = fptd_single(
-        t_in_final_stage[:, None],
-        mu_final[:, None],
-        sigma,
-        a_final[:, None],
-        -b,
-        -a_final[:, None],
-        b,
-        xs_final,
-        1,
-        trunc_num=trunc_num,
-    )
-    lower = fptd_single(
-        t_in_final_stage[:, None],
-        mu_final[:, None],
-        sigma,
-        a_final[:, None],
-        -b,
-        -a_final[:, None],
-        b,
-        xs_final,
-        -1,
-        trunc_num=trunc_num,
-    )
-    fptds = jnp.where(choice_data[:, None] == 1, upper, lower)
-
-    if log_space:
-        multi_stage = jnp.exp(logsumexp(_to_log_space(fptds) + log_ws_pv_final, axis=1))
-    else:
-        multi_stage = jnp.sum(fptds * ws_pv_final, axis=1)
+    xs_init_mid, ws_pv_init_mid, ws_pv_init_last = first_stage_batch()
+    xs_mid_final, ws_pv_mid_final = middle_stages_batch((xs_init_mid, ws_pv_init_mid))
+    multi_stage = last_stage_batch(xs_mid_final, ws_pv_mid_final, ws_pv_init_last)
 
     return jnp.where(d_data == 1, single_stage, multi_stage)
 
 
-def compute_addm_likelihoods_batchscan(
+def compute_addm_loglikelihoods_batchscan(
     rt_data,
     choice_data,
     eta,
@@ -624,12 +750,14 @@ def compute_addm_likelihoods_batchscan(
     sacc_array_data,
     d_data,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
     use_remat=False,
 ):
-    """Compute ADDM likelihoods with the dedicated batch stage-scan kernel.
+    """Compute ADDM log-likelihoods with the dedicated batch stage-scan kernel.
 
     JAX uses a fixed-length series controlled only by ``trunc_num``. There is
     no ``adaptive_stopping`` or ``threshold`` option in this backend.
@@ -641,10 +769,15 @@ def compute_addm_likelihoods_batchscan(
     If ``use_remat=True``, rematerialize the batch scan body to trade extra
     compute for lower reverse-mode memory use.
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
     mu_array_data = _build_addm_mu_array_data(
         eta, kappa, r1_data, r2_data, flag_data, d_data, sacc_array_data.shape[1]
     )
-    return _compute_addm_likelihoods_batchscan_core(
+    return _compute_addm_loglikelihoods_batchscan_core(
         rt_data,
         choice_data,
         mu_array_data,
@@ -654,7 +787,8 @@ def compute_addm_likelihoods_batchscan(
         a,
         b,
         x0,
-        order=order,
+        order_mid=order_mid,
+        order_last=order_last,
         trunc_num=trunc_num,
         log_space=log_space,
         use_remat=use_remat,
@@ -681,29 +815,44 @@ def compute_addm_nll(
     sacc_array_data,
     d_data,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
     use_remat=False,
     reduce="mean",
+    invalid_policy="inf",
     warn=True,
 ):
     """Compute negative log-likelihood for a batch of addm trials.
 
     Parameters
     ----------
-    order, trunc_num : int, optional
-        Quadrature order and fixed single-stage truncation length. JAX does not
-        expose ``adaptive_stopping`` or ``threshold`` in this backend.
+    order_mid, order_last, trunc_num : int, optional
+        Intermediate-stage quadrature order, final-stage quadrature order, and
+        fixed single-stage truncation length. JAX does not expose
+        ``adaptive_stopping`` or ``threshold`` in this backend.
     use_remat : bool, optional
-        If True, rematerialize the selected batch likelihood kernel to trade
+        If True, rematerialize the selected batch log-likelihood kernel to trade
         extra compute for lower reverse-mode memory use.
     reduce : str, optional
         ``"mean"`` (default) or ``"sum"``.
+    invalid_policy : {"inf", "warn"}, optional
+        ``"inf"`` propagates bad trials to ``+inf`` or ``NaN``. ``"warn"``
+        warns and skips them.
     warn : bool, optional
-        If True, emit warnings for skipped trials.
+        If True, emit warnings for bad trials. Defaults to True for this
+        one-shot convenience API. For hot optimization loops, prefer
+        :func:`make_addm_nll_function`, whose returned jitted closure stays
+        silent by default.
     """
-    likelihoods = compute_addm_likelihoods(
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
+    loglikelihoods = compute_addm_loglikelihoods(
         rt_data,
         choice_data,
         eta,
@@ -717,12 +866,18 @@ def compute_addm_nll(
         flag_data,
         sacc_array_data,
         d_data,
-        order=order,
+        order_mid=order_mid,
+        order_last=order_last,
         trunc_num=trunc_num,
         log_space=log_space,
         use_remat=use_remat,
     )
-    return _reduce_addm_likelihoods_to_nll(likelihoods, reduce=reduce, warn=warn)
+    return _reduce_addm_loglikelihoods_to_nll(
+        loglikelihoods,
+        reduce=reduce,
+        invalid_policy=invalid_policy,
+        warn=warn,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -740,20 +895,26 @@ def _build_addm_nll_function_with_kernel(
     sacc_array_data,
     d_data,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
     use_remat=False,
+    invalid_policy="inf",
 ):
-    """Build a jitted parameter-only NLL closure from a likelihood kernel.
+    """Build a jitted parameter-only NLL closure from a log-likelihood kernel.
 
     The returned function closes over fixed data and exposes only the model
     parameters ``(eta, kappa, sigma, a, b, x0)``.
+
+    This closure never emits Python warnings from inside the jitted path.
+    Call :func:`compute_addm_nll` directly when warning diagnostics for bad
+    trials are desired.
     """
 
     @jit
     def nll_fn(eta, kappa, sigma, a, b, x0):
-        likelihoods = kernel(
+        loglikelihoods = kernel(
             rt_data,
             choice_data,
             eta,
@@ -767,12 +928,18 @@ def _build_addm_nll_function_with_kernel(
             flag_data,
             sacc_array_data,
             d_data,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
             use_remat=use_remat,
         )
-        return _reduce_addm_likelihoods_to_nll(likelihoods, reduce="sum", warn=False)
+        return _reduce_addm_loglikelihoods_to_nll(
+            loglikelihoods,
+            reduce="sum",
+            invalid_policy=invalid_policy,
+            warn=False,
+        )
 
     return nll_fn
 
@@ -786,16 +953,24 @@ def make_addm_nll_function_batchvmap(
     sacc_array_data,
     d_data,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
     use_remat=False,
+    invalid_policy="inf",
 ):
     """Build an optimization closure using the legacy vmap baseline kernel.
 
     If ``use_remat=True``, rematerialize the vmapped single-trial production
     kernel to trade extra compute for lower reverse-mode memory use.
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
 
     def kernel(
         rt_data,
@@ -812,12 +987,13 @@ def make_addm_nll_function_batchvmap(
         sacc_array_data,
         d_data,
         *,
-        order=DEFAULT_QUADRATURE_ORDER,
+        order_mid=order_mid,
+        order_last=order_last,
         trunc_num=DEFAULT_TRUNC_NUM,
         log_space=False,
         use_remat=False,
     ):
-        return compute_addm_likelihoods_batchvmap(
+        return compute_addm_loglikelihoods_batchvmap(
             rt_data,
             choice_data,
             eta,
@@ -831,7 +1007,8 @@ def make_addm_nll_function_batchvmap(
             flag_data,
             sacc_array_data,
             d_data,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
             use_remat=use_remat,
@@ -846,10 +1023,12 @@ def make_addm_nll_function_batchvmap(
         flag_data,
         sacc_array_data,
         d_data,
-        order=order,
+        order_mid=order_mid,
+        order_last=order_last,
         trunc_num=trunc_num,
         log_space=log_space,
         use_remat=use_remat,
+        invalid_policy=invalid_policy,
     )
 
 
@@ -862,10 +1041,13 @@ def make_addm_nll_function_batchscan(
     sacc_array_data,
     d_data,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
     use_remat=False,
+    invalid_policy="inf",
 ):
     """Create a batched ADDM negative log-likelihood function for optimization.
 
@@ -875,6 +1057,11 @@ def make_addm_nll_function_batchscan(
     If ``use_remat=True``, rematerialize the batch stage-scan body to trade
     extra compute for lower reverse-mode memory use.
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
 
     def kernel(
         rt_data,
@@ -891,7 +1078,8 @@ def make_addm_nll_function_batchscan(
         sacc_array_data,
         d_data,
         *,
-        order=order,
+        order_mid=order_mid,
+        order_last=order_last,
         trunc_num=trunc_num,
         log_space=log_space,
         use_remat=use_remat,
@@ -899,7 +1087,7 @@ def make_addm_nll_function_batchscan(
         mu_array_data = _build_addm_mu_array_data(
             eta, kappa, r1_data, r2_data, flag_data, d_data, sacc_array_data.shape[1]
         )
-        return _compute_addm_likelihoods_batchscan_core(
+        return _compute_addm_loglikelihoods_batchscan_core(
             rt_data,
             choice_data,
             mu_array_data,
@@ -909,7 +1097,8 @@ def make_addm_nll_function_batchscan(
             a,
             b,
             x0,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
             use_remat=use_remat,
@@ -924,10 +1113,12 @@ def make_addm_nll_function_batchscan(
         flag_data,
         sacc_array_data,
         d_data,
-        order=order,
+        order_mid=order_mid,
+        order_last=order_last,
         trunc_num=trunc_num,
         log_space=log_space,
         use_remat=use_remat,
+        invalid_policy=invalid_policy,
     )
 
 # ---------------------------------------------------------------------------
@@ -935,9 +1126,16 @@ def make_addm_nll_function_batchscan(
 # ---------------------------------------------------------------------------
 
 
-compute_addm_likelihoods = compute_addm_likelihoods_batchscan
+compute_addm_loglikelihoods = compute_addm_loglikelihoods_batchscan
 make_addm_nll_function = make_addm_nll_function_batchscan
-compute_addm_likelihoods_jit = jit(
-    compute_addm_likelihoods,
-    static_argnames=("order", "trunc_num", "log_space", "use_remat"),
+compute_addm_loglikelihoods_jit = jit(
+    compute_addm_loglikelihoods,
+    static_argnames=(
+        "order_mid",
+        "order_last",
+        "order",
+        "trunc_num",
+        "log_space",
+        "use_remat",
+    ),
 )

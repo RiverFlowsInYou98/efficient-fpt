@@ -1,23 +1,31 @@
 """Cython-accelerated implementations of first-passage time density computation."""
 
-from .single_stage import fptd_basic, q_basic, fptd_single, q_single
+from .single_stage import (
+    fptd_basic,
+    q_basic,
+    fptd_single,
+    q_single,
+    log_fptd_basic,
+    log_q_basic,
+    log_fptd_single,
+    log_q_single,
+)
 from .multi_stage import (
-    compute_addm_fptd,
-    compute_heterog_multistage_fptd,
+    compute_addm_logfptd,
+    compute_heterog_multistage_logfptd,
 )
 from .utils import print_num_threads
 from .batch import (
-    compute_addm_likelihoods,
+    compute_addm_loglikelihoods,
     compute_addm_nll,
     compute_addm_mean_nll,
     compute_addm_sum_nll,
-    compute_tada_likelihoods,
+    compute_tada_loglikelihoods,
     compute_tada_mean_nll,
 )
 from .simulator import (
     simulate_homog_ddm_fpt,
     simulate_heterog_multistage_fpt,
-    _simulate_addm_fpt,
 )
 
 __all__ = [
@@ -26,20 +34,23 @@ __all__ = [
     "q_basic",
     "fptd_single",
     "q_single",
+    "log_fptd_basic",
+    "log_q_basic",
+    "log_fptd_single",
+    "log_q_single",
     # Multi-stage
-    "compute_addm_fptd",
-    "compute_heterog_multistage_fptd",
+    "compute_addm_logfptd",
+    "compute_heterog_multistage_logfptd",
     # Batch computation
-    "compute_addm_likelihoods",
+    "compute_addm_loglikelihoods",
     "compute_addm_nll",
     "compute_addm_mean_nll",
     "compute_addm_sum_nll",
-    "compute_tada_likelihoods",
+    "compute_tada_loglikelihoods",
     "compute_tada_mean_nll",
     # Simulation
     "simulate_homog_ddm_fpt",
     "simulate_heterog_multistage_fpt",
-    "_simulate_addm_fpt",
     # Utilities
     "print_num_threads",
 ]

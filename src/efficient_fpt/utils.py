@@ -6,8 +6,10 @@ import warnings
 
 import numpy as np
 
-# Backward-compatible re-exports — callers that use
-# ``from efficient_fpt.utils import ...`` will keep working.
+from ._defaults import (
+    DEFAULT_LAST_QUAD_ORDER,
+    DEFAULT_MID_QUAD_ORDER,
+)
 
 
 def adaptive_interpolation(
@@ -52,3 +54,50 @@ def adaptive_interpolation(
             stacklevel=2,
         )
     return x_points, y_points
+
+
+def resolve_quadrature_orders(order_mid, order_last, order=None):
+    """Resolve the repo's split quadrature-order configuration.
+
+    Parameters
+    ----------
+    order_mid : int
+        Order used for intermediate-stage ``q_single`` quadrature.
+    order_last : int
+        Order used for final-stage ``fptd_single`` quadrature.
+    order : int or None, optional
+        Legacy compatibility alias. When provided on its own, it maps to both
+        ``order_mid`` and ``order_last``.
+
+    Returns
+    -------
+    tuple[int, int]
+        Resolved ``(order_mid, order_last)``.
+
+    Notes
+    -----
+    The compatibility policy is:
+
+    - ``order`` only: map to both split orders
+    - split orders only: use them directly
+    - mixing ``order`` with non-default split orders: raise ``ValueError``
+    """
+    if order is not None:
+        if (
+            order_mid != DEFAULT_MID_QUAD_ORDER
+            or order_last != DEFAULT_LAST_QUAD_ORDER
+        ):
+            raise ValueError(
+                "pass either legacy order or split order_mid/order_last, not both"
+            )
+        order_mid = order
+        order_last = order
+
+    order_mid = int(order_mid)
+    order_last = int(order_last)
+    if order_mid <= 0 or order_last <= 0:
+        raise ValueError(
+            f"quadrature orders must be positive, got order_mid={order_mid}, "
+            f"order_last={order_last}"
+        )
+    return order_mid, order_last

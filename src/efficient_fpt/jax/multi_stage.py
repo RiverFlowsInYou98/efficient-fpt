@@ -3,11 +3,11 @@
 This module holds *both* explicit single-trial JAX implementations:
 
 - public production kernels:
-  ``compute_addm_fptd_precomputed`` and
-  ``compute_heterog_multistage_fptd_precomputed``
+  ``compute_addm_logfptd_precomputed`` and
+  ``compute_heterog_multistage_logfptd_precomputed``
 - public stage-scan kernels:
-  ``compute_addm_fptd_stagescan`` and
-  ``compute_heterog_multistage_fptd_stagescan``
+  ``compute_addm_logfptd_stagescan`` and
+  ``compute_heterog_multistage_logfptd_stagescan``
 
 The production path precomputes all stage transition matrices for one trial
 with ``vmap`` over stage index, then propagates the alive-state mass through
@@ -26,8 +26,8 @@ So the split is:
 - this file: single-trial precomputed + single-trial stage-scan
 - ``jax.batch``: batch legacy baseline + batch production
 
-The plain aliases ``compute_addm_fptd`` and
-``compute_heterog_multistage_fptd`` continue to point to the precomputed
+The plain aliases ``compute_addm_logfptd`` and
+``compute_heterog_multistage_logfptd`` continue to point to the precomputed
 production kernels.
 
 JAX uses a fixed-length series controlled only by ``trunc_num``. There is no
@@ -39,21 +39,19 @@ from jax import jit, lax, vmap
 from jax.scipy.special import logsumexp
 
 from .addm_helpers import _build_addm_mu_array
-from .single_stage import fptd_single, q_single
-from .utils import get_gauss_legendre_ref, _DUMMY_STAGE_DURATION
-from .._defaults import DEFAULT_QUADRATURE_ORDER, DEFAULT_TRUNC_NUM
+from .single_stage import fptd_single, q_single, log_fptd_single
+from .utils import get_gauss_legendre_ref, _DUMMY_STAGE_DURATION, positive_log
+from .._defaults import (
+    DEFAULT_LAST_QUAD_ORDER,
+    DEFAULT_MID_QUAD_ORDER,
+    DEFAULT_TRUNC_NUM,
+)
+from ..utils import resolve_quadrature_orders
 
 
 # ---------------------------------------------------------------------------
 # Tiny numeric helpers
 # ---------------------------------------------------------------------------
-
-
-def _to_log_space(a):
-    """Return log(a) for positive entries and -inf otherwise."""
-    safe = jnp.where(a > 0, a, 1.0)
-    return jnp.where(a > 0, jnp.log(safe), -jnp.inf)
-
 
 def _safe_stage_durations(node_array, d):
     """Build a numerically safe duration vector from a padded stage-time array.
@@ -262,44 +260,45 @@ def _effective_general_schedule(node_array, d, a1, b1_array, a2, b2_array):
 # ---------------------------------------------------------------------------
 
 
-def _propagate_ws_pv(P_all, ws_all, ws_pv_init, d, log_space):
+def _propagate_ws_pv(P_all, ws_all, ws_pv_init, num_active, log_space):
     """Propagate ws_pv across precomputed stage transitions.
     ws_pv = ws * pv (elementwise product),
     where ws is the quadrature weight and pv is non-passive density.
 
     Parameters
     ----------
-    P_all : jax.Array, shape (max_d - 2, order, order)
-        Precomputed transition matrices between consecutive stage interfaces.
-    ws_all : jax.Array, shape (order, max_d - 1)
-        Quadrature weights at each stage interface.
-    ws_pv_init : jax.Array, shape (order,)
+    P_all : jax.Array, shape (n_transitions, order_mid, order_mid)
+        Precomputed mid-stage transition matrices between consecutive
+        intermediate interfaces.
+    ws_all : jax.Array, shape (order_mid, n_interfaces)
+        Intermediate-interface quadrature weights.
+    ws_pv_init : jax.Array, shape (order_mid,)
         Weighted alive-state mass after the first stage.
-    d : int
-        Number of valid stages.
+    num_active : int
+        Number of active transition matrices to apply.
     log_space : bool
         Whether ``ws_pv_init`` and the propagated state are represented in log
         space.
 
     Returns
     -------
-    jax.Array, shape (order,)
-        Weighted alive-state mass at the start of the final valid stage.
+    jax.Array, shape (order_mid,)
+        Weighted alive-state mass at the start of the final q-propagation stage.
 
     Notes
     -----
     The scan still iterates over the padded tail for fixed-shape JAX tracing,
-    but once ``k >= d - 2`` the carry is left unchanged.
+    but once ``k >= num_active`` the carry is left unchanged.
     """
     stage_indices = jnp.arange(P_all.shape[0])
 
     if log_space:
-        log_P_all = _to_log_space(P_all)
+        log_P_all = positive_log(P_all)
 
         def mv_step(log_ws_pv_prev, k):
             log_pv_new = logsumexp(log_P_all[k] + log_ws_pv_prev[None, :], axis=1)
-            log_ws_pv_new = _to_log_space(ws_all[:, k + 1]) + log_pv_new
-            active = k < (d - 2)
+            log_ws_pv_new = positive_log(ws_all[:, k + 1]) + log_pv_new
+            active = k < num_active
             return jnp.where(active, log_ws_pv_new, log_ws_pv_prev), None
 
     else:
@@ -308,11 +307,168 @@ def _propagate_ws_pv(P_all, ws_all, ws_pv_init, d, log_space):
             ws_k = ws_all[:, k + 1]
             pv_new = P_all[k] @ ws_pv_prev
             ws_pv_new = ws_k * pv_new
-            active = k < (d - 2)
+            active = k < num_active
             return jnp.where(active, ws_pv_new, ws_pv_prev), None
 
     ws_pv_final, _ = lax.scan(mv_step, ws_pv_init, stage_indices)
     return ws_pv_final
+
+
+def _apply_transition(P, ws_dest, ws_pv_prev, log_space):
+    """Apply one transition matrix to a weighted alive-state carry."""
+    if log_space:
+        log_pv = logsumexp(positive_log(P) + ws_pv_prev[None, :], axis=1)
+        return positive_log(ws_dest) + log_pv
+    pv = P @ ws_pv_prev
+    return ws_dest * pv
+
+
+def _symmetric_stage_grid(x_ref, w_ref, a_stage):
+    """Map reference quadrature nodes/weights to a symmetric interval."""
+    a_stage = jnp.asarray(a_stage)
+    return x_ref * a_stage[..., None], w_ref * a_stage[..., None]
+
+
+def _general_stage_grid(x_ref, w_ref, ub_stage, lb_stage):
+    """Map reference quadrature nodes/weights to an asymmetric interval."""
+    half_width = (ub_stage - lb_stage) / 2.0
+    center = (ub_stage + lb_stage) / 2.0
+    half_width = jnp.asarray(half_width)
+    center = jnp.asarray(center)
+    return (
+        x_ref * half_width[..., None] + center[..., None],
+        w_ref * half_width[..., None],
+    )
+
+
+def _reduce_final_stage_fptds(fptds, ws_pv_final, log_space, *, axis=None):
+    """Reduce final-stage densities against weighted alive-state mass."""
+    if log_space:
+        return logsumexp(positive_log(fptds) + ws_pv_final, axis=axis)
+    return positive_log(jnp.sum(fptds * ws_pv_final, axis=axis))
+
+
+def _addm_first_stage_to_grid(
+    xs_target,
+    ws_target,
+    *,
+    mu0,
+    sigma,
+    a,
+    upper_slope0,
+    lower_slope0,
+    stage_duration0,
+    x0,
+    trunc_num,
+    log_space,
+):
+    """Initialize first-stage weighted alive-state mass on a target grid."""
+    pv_init = q_single(
+        xs_target,
+        mu0,
+        sigma,
+        a,
+        upper_slope0,
+        -a,
+        lower_slope0,
+        stage_duration0,
+        x0,
+        trunc_num=trunc_num,
+    )
+    ws_pv = ws_target * pv_init
+    return positive_log(ws_pv) if log_space else ws_pv
+
+
+def _general_first_stage_to_grid(
+    xs_target,
+    ws_target,
+    *,
+    x0,
+    mu0,
+    sigma0,
+    upper_start0,
+    lower_start0,
+    upper_slope0,
+    lower_slope0,
+    stage_duration0,
+    trunc_num,
+    log_space,
+):
+    """Initialize first-stage weighted alive-state mass on a target grid."""
+    pv_init = q_single(
+        xs_target,
+        mu0,
+        sigma0,
+        upper_start0,
+        upper_slope0,
+        lower_start0,
+        lower_slope0,
+        stage_duration0,
+        x0,
+        trunc_num=trunc_num,
+    )
+    ws_pv = ws_target * pv_init
+    return positive_log(ws_pv) if log_space else ws_pv
+
+
+def _finish_addm_last_stage(
+    t_in_final_stage,
+    choice,
+    *,
+    mu_final,
+    sigma,
+    a_final,
+    b,
+    xs_final,
+    ws_pv_final,
+    trunc_num,
+    log_space,
+):
+    """Evaluate and reduce the final-stage ADDM log-FPTD."""
+    fptds = fptd_single(
+        t_in_final_stage,
+        mu_final,
+        sigma,
+        a_final,
+        -b,
+        -a_final,
+        b,
+        xs_final,
+        choice,
+        trunc_num=trunc_num,
+    )
+    return _reduce_final_stage_fptds(fptds, ws_pv_final, log_space)
+
+
+def _finish_general_last_stage(
+    t_in_final_stage,
+    choice,
+    *,
+    mu_final,
+    sigma_final,
+    ub_final,
+    lb_final,
+    b1_final,
+    b2_final,
+    xs_final,
+    ws_pv_final,
+    trunc_num,
+    log_space,
+):
+    """Evaluate and reduce the final-stage generalized log-FPTD."""
+    fptds = fptd_single(
+        t_in_final_stage,
+        mu_final,
+        sigma_final,
+        ub_final,
+        b1_final,
+        lb_final,
+        b2_final,
+        xs_final,
+        choice,
+        trunc_num=trunc_num,
+    )
+    return _reduce_final_stage_fptds(fptds, ws_pv_final, log_space)
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +476,7 @@ def _propagate_ws_pv(P_all, ws_all, ws_pv_init, d, log_space):
 # ---------------------------------------------------------------------------
 
 
-def _addm_fptd_precomputed(
+def _addm_logfptd_precomputed(
     rt,
     choice,
     sigma,
@@ -331,11 +487,12 @@ def _addm_fptd_precomputed(
     sacc_array,
     d,
     *,
-    order,
+    order_mid,
+    order_last,
     trunc_num,
     log_space,
 ):
-    """Single-trial ADDM FPTD with precomputed transition matrices.
+    """Single-trial ADDM log-FPTD with precomputed transition matrices.
 
     The computation skeleton is:
 
@@ -353,106 +510,149 @@ def _addm_fptd_precomputed(
 
     This should be contrasted with:
 
-    - ``compute_addm_fptd_stagescan`` below in this same module:
+    - ``compute_addm_logfptd_stagescan`` below in this same module:
       single-trial, but computes transitions inside ``lax.scan``
-    - ``jax.batch.compute_addm_likelihoods_batchvmap``: batch baseline that vmaps
+    - ``jax.batch.compute_addm_loglikelihoods_batchvmap``: batch baseline that vmaps
       the public single-trial API over trials
-    - ``jax.batch.compute_addm_likelihoods_batchscan``: production batch kernel
+    - ``jax.batch.compute_addm_loglikelihoods_batchscan``: production batch kernel
       that carries the whole batch through one scan and computes transitions
       on the fly stage by stage
     """
-    # Reference Gauss-Legendre quadrature on [-1, 1].
-    x_ref, w_ref = get_gauss_legendre_ref(order)
-
     max_d = mu_array.shape[0]
     if max_d < 2:
-        return fptd_single(
+        return log_fptd_single(
             rt, mu_array[0], sigma, a, -b, -a, b, x0, choice, trunc_num=trunc_num
         )
+    x_ref_mid, w_ref_mid = get_gauss_legendre_ref(order_mid)
+    x_ref_last, w_ref_last = get_gauss_legendre_ref(order_last)
 
     # Build stage-local boundary geometry, then place interface quadrature
     # nodes/weights for every potential stage transition.
     safe_stage_duration_array, upper_slope_array, lower_slope_array, a_starts = (
         _effective_addm_schedule(sacc_array, d, a, b)
     )
-    # xs_all / ws_all have shape (order, max_d - 1). Column k is the latent
-    # state quadrature grid at the start of stage k + 1.
-    xs_all = x_ref[:, None] * a_starts[1:]
-    ws_all = w_ref[:, None] * a_starts[1:]
-
-    # Propagate the initial point x0 through stage 0 to the first interface.
-    pv_init = q_single(
-        xs_all[:, 0],
-        mu_array[0],
-        sigma,
-        a,
-        upper_slope_array[0],
-        -a,
-        lower_slope_array[0],
-        safe_stage_duration_array[0],
-        x0,
-        trunc_num=trunc_num,
-    )
-
-    if log_space:
-        ws_pv_init = _to_log_space(ws_all[:, 0] * pv_init)
-    else:
-        ws_pv_init = ws_all[:, 0] * pv_init
-
-    if max_d > 2:
-
-        def compute_transition_matrices(k):
-            stage_idx = k + 1
-            a_prev = a_starts[stage_idx]
-            return q_single(
-                xs_all[:, stage_idx, None],
-                mu_array[stage_idx],
-                sigma,
-                a_prev,
-                upper_slope_array[stage_idx],
-                -a_prev,
-                lower_slope_array[stage_idx],
-                safe_stage_duration_array[stage_idx],
-                xs_all[:, k, None].T,
-                trunc_num=trunc_num,
-            )
-
-        # P_all has shape (max_d - 2, order, order). Entry k maps interface k
-        # to interface k + 1 for this trial.
-        P_all = vmap(compute_transition_matrices)(jnp.arange(max_d - 2))
-        ws_pv_final = _propagate_ws_pv(P_all, ws_all, ws_pv_init, d, log_space)
-    else:
-        ws_pv_final = ws_pv_init
-
-    # Select the real final stage, evaluate boundary-hit density from every
-    # latent start position, then quadrature-reduce to a scalar likelihood.
     safe_d_idx = jnp.minimum(d - 1, max_d - 1)
-    quad_idx = jnp.maximum(safe_d_idx - 1, 0)
-    xs_final = xs_all[:, quad_idx]
-    a_final = a_starts[safe_d_idx]
-    sacc_final = sacc_array[safe_d_idx]
-    mu_final = mu_array[safe_d_idx]
-    t_in_final_stage = rt - sacc_final
 
-    fptds = fptd_single(
-        t_in_final_stage,
-        mu_final,
-        sigma,
-        a_final,
-        -b,
-        -a_final,
-        b,
-        xs_final,
-        choice,
-        trunc_num=trunc_num,
-    )
+    def first_stage_last(_):
+        xs_final, ws_final = _symmetric_stage_grid(x_ref_last, w_ref_last, a_starts[1])
+        ws_pv_final = _addm_first_stage_to_grid(
+            xs_final,
+            ws_final,
+            mu0=mu_array[0],
+            sigma=sigma,
+            a=a,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            x0=x0,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return _finish_addm_last_stage(
+            rt - sacc_array[1],
+            choice,
+            mu_final=mu_array[1],
+            sigma=sigma,
+            a_final=a_starts[1],
+            b=b,
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
 
-    if log_space:
-        return jnp.exp(logsumexp(_to_log_space(fptds) + ws_pv_final))
-    return jnp.sum(fptds * ws_pv_final)
+    def first_stage_mid():
+        xs_mid_all = x_ref_mid[:, None] * a_starts[1:-1]
+        ws_mid_all = w_ref_mid[:, None] * a_starts[1:-1]
+        ws_pv_mid = _addm_first_stage_to_grid(
+            xs_mid_all[:, 0],
+            ws_mid_all[:, 0],
+            mu0=mu_array[0],
+            sigma=sigma,
+            a=a,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            x0=x0,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return xs_mid_all, ws_mid_all, ws_pv_mid
+
+    def middle_stages(xs_mid_all, ws_mid_all, ws_pv_mid):
+        if max_d > 3:
+
+            def compute_mid_transition(k):
+                stage_idx = k + 1
+                a_prev = a_starts[stage_idx]
+                return q_single(
+                    xs_mid_all[:, k + 1, None],
+                    mu_array[stage_idx],
+                    sigma,
+                    a_prev,
+                    upper_slope_array[stage_idx],
+                    -a_prev,
+                    lower_slope_array[stage_idx],
+                    safe_stage_duration_array[stage_idx],
+                    xs_mid_all[:, k, None].T,
+                    trunc_num=trunc_num,
+                )
+
+            P_mid_all = vmap(compute_mid_transition)(jnp.arange(max_d - 3))
+            return _propagate_ws_pv(
+                P_mid_all,
+                ws_mid_all,
+                ws_pv_mid,
+                jnp.maximum(d - 3, 0),
+                log_space,
+            )
+        return ws_pv_mid
+
+    def last_stage_from_mid(xs_mid_all, ws_pv_mid):
+        last_q_stage_idx = safe_d_idx - 1
+        source_mid_idx = jnp.maximum(last_q_stage_idx - 1, 0)
+        xs_mid_source = xs_mid_all[:, source_mid_idx]
+        a_prev_last = a_starts[last_q_stage_idx]
+        a_final = a_starts[safe_d_idx]
+        xs_final = x_ref_last * a_final
+        ws_final = w_ref_last * a_final
+        P_last = q_single(
+            xs_final[:, None],
+            mu_array[last_q_stage_idx],
+            sigma,
+            a_prev_last,
+            upper_slope_array[last_q_stage_idx],
+            -a_prev_last,
+            lower_slope_array[last_q_stage_idx],
+            safe_stage_duration_array[last_q_stage_idx],
+            xs_mid_source[None, :],
+            trunc_num=trunc_num,
+        )
+        ws_pv_final = _apply_transition(P_last, ws_final, ws_pv_mid, log_space)
+        return _finish_addm_last_stage(
+            rt - sacc_array[safe_d_idx],
+            choice,
+            mu_final=mu_array[safe_d_idx],
+            sigma=sigma,
+            a_final=a_final,
+            b=b,
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+
+    def multi_stage_from_mid(_):
+        xs_mid_all, ws_mid_all, ws_pv_mid = first_stage_mid()
+        ws_pv_mid = middle_stages(xs_mid_all, ws_mid_all, ws_pv_mid)
+        return last_stage_from_mid(xs_mid_all, ws_pv_mid)
+
+    if max_d == 2:
+        return first_stage_last(None)
+    return lax.cond(safe_d_idx == 1, first_stage_last, multi_stage_from_mid, operand=None)
 
 
-def compute_addm_fptd_precomputed(
+def compute_addm_logfptd_precomputed(
     rt,
     choice,
     eta,
@@ -467,11 +667,13 @@ def compute_addm_fptd_precomputed(
     sacc_array,
     d,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
 ):
-    """Multi-stage FPTD for attention-dependent drift diffusion model.
+    """Multi-stage log-FPTD for attention-dependent drift diffusion model.
 
     JAX uses a fixed-length series controlled only by ``trunc_num``. There is no
     ``adaptive_stopping`` or ``threshold`` option in this backend.
@@ -480,6 +682,11 @@ def compute_addm_fptd_precomputed(
     ``(eta, kappa, r1, r2, flag)`` and dispatches to the explicit production
     kernel after building the derived stage drifts.
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
     mu_array = _build_addm_mu_array(
         eta,
         kappa,
@@ -492,7 +699,7 @@ def compute_addm_fptd_precomputed(
     )
 
     def single_fn(_):
-        return fptd_single(
+        return log_fptd_single(
             rt,
             mu_array[0],
             sigma,
@@ -509,7 +716,7 @@ def compute_addm_fptd_precomputed(
         return single_fn(None)
 
     def multi_fn(_):
-        return _addm_fptd_precomputed(
+        return _addm_logfptd_precomputed(
             rt,
             choice,
             sigma,
@@ -519,7 +726,8 @@ def compute_addm_fptd_precomputed(
             mu_array,
             sacc_array,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
         )
@@ -532,7 +740,7 @@ def compute_addm_fptd_precomputed(
 # ---------------------------------------------------------------------------
 
 
-def _heterog_multistage_fptd_precomputed(
+def _heterog_multistage_logfptd_precomputed(
     rt,
     choice,
     x0,
@@ -545,21 +753,19 @@ def _heterog_multistage_fptd_precomputed(
     b2_array,
     d,
     *,
-    order,
+    order_mid,
+    order_last,
     trunc_num,
     log_space,
 ):
-    """Generalized multi-stage FPTD with precomputed transitions.
+    """Generalized multi-stage log-FPTD with precomputed transitions.
 
-    The computation skeleton mirrors :func:`_addm_fptd_precomputed`, but with
+    The computation skeleton mirrors :func:`_addm_logfptd_precomputed`, but with
     separate upper/lower boundary schedules and per-stage sigma values.
     """
-    # Reference Gauss-Legendre quadrature on [-1, 1].
-    x_ref, w_ref = get_gauss_legendre_ref(order)
-
     max_d = mu_array.shape[0]
     if max_d < 2:
-        return fptd_single(
+        return log_fptd_single(
             rt,
             mu_array[0],
             sigma_array[0],
@@ -571,6 +777,8 @@ def _heterog_multistage_fptd_precomputed(
             choice,
             trunc_num=trunc_num,
         )
+    x_ref_mid, w_ref_mid = get_gauss_legendre_ref(order_mid)
+    x_ref_last, w_ref_last = get_gauss_legendre_ref(order_last)
 
     (
         safe_stage_duration_array,
@@ -580,88 +788,137 @@ def _heterog_multistage_fptd_precomputed(
         lb_starts,
     ) = _effective_general_schedule(node_array, d, a1, b1_array, a2, b2_array)
 
-    # xs_all / ws_all have shape (order, max_d - 1). Each column is the
-    # quadrature grid at the start of the next stage.
-    half_w_starts = (ub_starts[1:] - lb_starts[1:]) / 2.0
-    center_starts = (ub_starts[1:] + lb_starts[1:]) / 2.0
-    xs_all = x_ref[:, None] * half_w_starts + center_starts
-    ws_all = w_ref[:, None] * half_w_starts
-
-    # Propagate x0 through stage 0 to the first interface.
-    pv_init = q_single(
-        xs_all[:, 0],
-        mu_array[0],
-        sigma_array[0],
-        a1,
-        upper_slope_array[0],
-        a2,
-        lower_slope_array[0],
-        safe_stage_duration_array[0],
-        x0,
-        trunc_num=trunc_num,
-    )
-
-    if log_space:
-        ws_pv_init = _to_log_space(ws_all[:, 0] * pv_init)
-    else:
-        ws_pv_init = ws_all[:, 0] * pv_init
-
-    if max_d > 2:
-
-        def compute_transition_matrices(k):
-            stage_idx = k + 1
-            return q_single(
-                xs_all[:, k + 1, None],
-                mu_array[stage_idx],
-                sigma_array[stage_idx],
-                ub_starts[stage_idx],
-                upper_slope_array[stage_idx],
-                lb_starts[stage_idx],
-                lower_slope_array[stage_idx],
-                safe_stage_duration_array[stage_idx],
-                xs_all[:, k, None].T,
-                trunc_num=trunc_num,
-            )
-
-        # P_all has shape (max_d - 2, order, order).
-        P_all = vmap(compute_transition_matrices)(jnp.arange(max_d - 2))
-        ws_pv_final = _propagate_ws_pv(P_all, ws_all, ws_pv_init, d, log_space)
-    else:
-        ws_pv_final = ws_pv_init
-
-    # Select the true final stage, evaluate the final-stage hit density from
-    # each latent start position, then reduce over quadrature nodes.
     safe_d_idx = jnp.minimum(d - 1, max_d - 1)
-    quad_idx = jnp.maximum(safe_d_idx - 1, 0)
-    xs_final = xs_all[:, quad_idx]
-    ub_final = ub_starts[safe_d_idx]
-    lb_final = lb_starts[safe_d_idx]
-    node_final = node_array[safe_d_idx]
-    mu_final = mu_array[safe_d_idx]
-    sigma_final = sigma_array[safe_d_idx]
-    b1_final = b1_array[safe_d_idx]
-    b2_final = b2_array[safe_d_idx]
-    t_in_final_stage = rt - node_final
+    half_w_mid = (ub_starts[1:-1] - lb_starts[1:-1]) / 2.0
+    center_mid = (ub_starts[1:-1] + lb_starts[1:-1]) / 2.0
 
-    fptds = fptd_single(
-        t_in_final_stage,
-        mu_final,
-        sigma_final,
-        ub_final,
-        b1_final,
-        lb_final,
-        b2_final,
-        xs_final,
-        choice,
-        trunc_num=trunc_num,
-    )
+    def first_stage_last(_):
+        xs_final, ws_final = _general_stage_grid(
+            x_ref_last, w_ref_last, ub_starts[1], lb_starts[1]
+        )
+        ws_pv_final = _general_first_stage_to_grid(
+            xs_final,
+            ws_final,
+            x0=x0,
+            mu0=mu_array[0],
+            sigma0=sigma_array[0],
+            upper_start0=a1,
+            lower_start0=a2,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return _finish_general_last_stage(
+            rt - node_array[1],
+            choice,
+            mu_final=mu_array[1],
+            sigma_final=sigma_array[1],
+            ub_final=ub_starts[1],
+            lb_final=lb_starts[1],
+            b1_final=b1_array[1],
+            b2_final=b2_array[1],
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
 
-    if log_space:
-        return jnp.exp(logsumexp(_to_log_space(fptds) + ws_pv_final))
-    return jnp.sum(fptds * ws_pv_final)
+    def first_stage_mid():
+        xs_mid_all = x_ref_mid[:, None] * half_w_mid + center_mid
+        ws_mid_all = w_ref_mid[:, None] * half_w_mid
+        ws_pv_mid = _general_first_stage_to_grid(
+            xs_mid_all[:, 0],
+            ws_mid_all[:, 0],
+            x0=x0,
+            mu0=mu_array[0],
+            sigma0=sigma_array[0],
+            upper_start0=a1,
+            lower_start0=a2,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return xs_mid_all, ws_mid_all, ws_pv_mid
+
+    def middle_stages(xs_mid_all, ws_mid_all, ws_pv_mid):
+        if max_d > 3:
+
+            def compute_mid_transition(k):
+                stage_idx = k + 1
+                return q_single(
+                    xs_mid_all[:, k + 1, None],
+                    mu_array[stage_idx],
+                    sigma_array[stage_idx],
+                    ub_starts[stage_idx],
+                    upper_slope_array[stage_idx],
+                    lb_starts[stage_idx],
+                    lower_slope_array[stage_idx],
+                    safe_stage_duration_array[stage_idx],
+                    xs_mid_all[:, k, None].T,
+                    trunc_num=trunc_num,
+                )
+
+            P_mid_all = vmap(compute_mid_transition)(jnp.arange(max_d - 3))
+            return _propagate_ws_pv(
+                P_mid_all,
+                ws_mid_all,
+                ws_pv_mid,
+                jnp.maximum(d - 3, 0),
+                log_space,
+            )
+        return ws_pv_mid
+
+    def last_stage_from_mid(xs_mid_all, ws_pv_mid):
+        last_q_stage_idx = safe_d_idx - 1
+        source_mid_idx = jnp.maximum(last_q_stage_idx - 1, 0)
+        xs_mid_source = xs_mid_all[:, source_mid_idx]
+        half_w_last = (ub_starts[safe_d_idx] - lb_starts[safe_d_idx]) / 2.0
+        center_last = (ub_starts[safe_d_idx] + lb_starts[safe_d_idx]) / 2.0
+        xs_final = x_ref_last * half_w_last + center_last
+        ws_final = w_ref_last * half_w_last
+        P_last = q_single(
+            xs_final[:, None],
+            mu_array[last_q_stage_idx],
+            sigma_array[last_q_stage_idx],
+            ub_starts[last_q_stage_idx],
+            upper_slope_array[last_q_stage_idx],
+            lb_starts[last_q_stage_idx],
+            lower_slope_array[last_q_stage_idx],
+            safe_stage_duration_array[last_q_stage_idx],
+            xs_mid_source[None, :],
+            trunc_num=trunc_num,
+        )
+        ws_pv_final = _apply_transition(P_last, ws_final, ws_pv_mid, log_space)
+        return _finish_general_last_stage(
+            rt - node_array[safe_d_idx],
+            choice,
+            mu_final=mu_array[safe_d_idx],
+            sigma_final=sigma_array[safe_d_idx],
+            ub_final=ub_starts[safe_d_idx],
+            lb_final=lb_starts[safe_d_idx],
+            b1_final=b1_array[safe_d_idx],
+            b2_final=b2_array[safe_d_idx],
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+
+    def multi_stage_from_mid(_):
+        xs_mid_all, ws_mid_all, ws_pv_mid = first_stage_mid()
+        ws_pv_mid = middle_stages(xs_mid_all, ws_mid_all, ws_pv_mid)
+        return last_stage_from_mid(xs_mid_all, ws_pv_mid)
+
+    if max_d == 2:
+        return first_stage_last(None)
+    return lax.cond(safe_d_idx == 1, first_stage_last, multi_stage_from_mid, operand=None)
 
 
-def compute_heterog_multistage_fptd_precomputed(
+def compute_heterog_multistage_logfptd_precomputed(
     rt,
     choice,
     x0,
@@ -674,11 +931,13 @@ def compute_heterog_multistage_fptd_precomputed(
     b2_array,
     d,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
 ):
-    """Generalized multi-stage FPTD with per-stage sigma and boundary slopes.
+    """Generalized multi-stage log-FPTD with per-stage sigma and boundary slopes.
 
     JAX uses a fixed-length series controlled only by ``trunc_num``. There is no
     ``adaptive_stopping`` or ``threshold`` option in this backend.
@@ -686,9 +945,14 @@ def compute_heterog_multistage_fptd_precomputed(
     This public wrapper keeps the generalized multistage signature while
     dispatching to the explicit precomputed production kernel.
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
 
     def single_fn(_):
-        return fptd_single(
+        return log_fptd_single(
             rt,
             mu_array[0],
             sigma_array[0],
@@ -705,7 +969,7 @@ def compute_heterog_multistage_fptd_precomputed(
         return single_fn(None)
 
     def multi_fn(_):
-        return _heterog_multistage_fptd_precomputed(
+        return _heterog_multistage_logfptd_precomputed(
             rt,
             choice,
             x0,
@@ -717,7 +981,8 @@ def compute_heterog_multistage_fptd_precomputed(
             b1_array,
             b2_array,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
         )
@@ -730,7 +995,7 @@ def compute_heterog_multistage_fptd_precomputed(
 # ---------------------------------------------------------------------------
 
 
-def _addm_fptd_stagescan(
+def _addm_logfptd_stagescan(
     rt,
     choice,
     sigma,
@@ -741,11 +1006,12 @@ def _addm_fptd_stagescan(
     sacc_array,
     d,
     *,
-    order,
+    order_mid,
+    order_last,
     trunc_num,
     log_space,
 ):
-    """Single-trial ADDM stage-scan kernel using scan-time transition updates.
+    """Single-trial ADDM log-FPTD stage-scan kernel using scan-time transition updates.
 
     The computation skeleton is:
 
@@ -758,7 +1024,7 @@ def _addm_fptd_stagescan(
     Notes
     -----
     This is the public single-trial stage-scan implementation for JAX
-    multistage ADDM. Unlike :func:`_addm_fptd_precomputed`, it does not
+    multistage ADDM. Unlike :func:`_addm_logfptd_precomputed`, it does not
     materialize all stage transition matrices up front. Instead, each stage
     transition matrix is computed inside the ``lax.scan`` body and consumed
     immediately.
@@ -773,132 +1039,169 @@ def _addm_fptd_stagescan(
     the explicit stage-scan alternative for tests, benchmarking, and clearer
     algorithmic comparison.
     """
-    # Reference Gauss-Legendre quadrature on [-1, 1].
-    x_ref, w_ref = get_gauss_legendre_ref(order)
-
     max_d = mu_array.shape[0]
     if max_d < 2:
-        return fptd_single(
+        return log_fptd_single(
             rt, mu_array[0], sigma, a, -b, -a, b, x0, choice, trunc_num=trunc_num
         )
+    x_ref_mid, w_ref_mid = get_gauss_legendre_ref(order_mid)
+    x_ref_last, w_ref_last = get_gauss_legendre_ref(order_last)
 
-    # Build stage-local geometry, then place the first interface quadrature
-    # nodes/weights explicitly.
     safe_stage_duration_array, upper_slope_array, lower_slope_array, a_starts = (
         _effective_addm_schedule(sacc_array, d, a, b)
     )
-
-    a_1 = a_starts[1]
-    xs_init = x_ref * a_1
-    ws_init = w_ref * a_1
-
-    pv_init = q_single(
-        xs_init,
-        mu_array[0],
-        sigma,
-        a,
-        upper_slope_array[0],
-        -a,
-        lower_slope_array[0],
-        safe_stage_duration_array[0],
-        x0,
-        trunc_num=trunc_num,
-    )
-
-    if log_space:
-        ws_pv_init = _to_log_space(ws_init * pv_init)
-    else:
-        ws_pv_init = ws_init * pv_init
-
-    # Carry tracks the current interface nodes, weighted alive-state mass, and
-    # boundary height at the start of the current stage.
-    carry = (xs_init, ws_pv_init, a_1)
-
-    if log_space:
-
-        def stage_step(carry, stage_idx):
-            xs_prev, log_ws_pv_prev, a_prev = carry
-            a_curr = a_starts[stage_idx + 1]
-            xs = x_ref * a_curr
-            ws = w_ref * a_curr
-            P = q_single(
-                xs[:, None],
-                mu_array[stage_idx],
-                sigma,
-                a_prev,
-                upper_slope_array[stage_idx],
-                -a_prev,
-                lower_slope_array[stage_idx],
-                safe_stage_duration_array[stage_idx],
-                xs_prev[None, :],
-                trunc_num=trunc_num,
-            )
-            log_pv = logsumexp(_to_log_space(P) + log_ws_pv_prev[None, :], axis=1)
-            log_ws_pv = _to_log_space(ws) + log_pv
-            active = stage_idx < (d - 1)
-            xs_out = jnp.where(active, xs, xs_prev)
-            ws_pv_out = jnp.where(active, log_ws_pv, log_ws_pv_prev)
-            a_out = jnp.where(active, a_curr, a_prev)
-            return (xs_out, ws_pv_out, a_out), None
-
-    else:
-
-        def stage_step(carry, stage_idx):
-            xs_prev, ws_pv_prev, a_prev = carry
-            a_curr = a_starts[stage_idx + 1]
-            xs = x_ref * a_curr
-            ws = w_ref * a_curr
-            P = q_single(
-                xs[:, None],
-                mu_array[stage_idx],
-                sigma,
-                a_prev,
-                upper_slope_array[stage_idx],
-                -a_prev,
-                lower_slope_array[stage_idx],
-                safe_stage_duration_array[stage_idx],
-                xs_prev[None, :],
-                trunc_num=trunc_num,
-            )
-            pv = P @ ws_pv_prev
-            ws_pv = ws * pv
-            active = stage_idx < (d - 1)
-            xs_out = jnp.where(active, xs, xs_prev)
-            ws_pv_out = jnp.where(active, ws_pv, ws_pv_prev)
-            a_out = jnp.where(active, a_curr, a_prev)
-            return (xs_out, ws_pv_out, a_out), None
-
-    if max_d > 2:
-        carry, _ = lax.scan(stage_step, carry, jnp.arange(1, max_d - 1))
-
-    # Evaluate the observed hit density in the true final stage and reduce over
-    # the latent start-position quadrature grid.
-    xs_final, ws_pv_final, _ = carry
     safe_d_idx = jnp.minimum(d - 1, max_d - 1)
-    a_final = a_starts[safe_d_idx]
-    sacc_final = sacc_array[safe_d_idx]
-    mu_final = mu_array[safe_d_idx]
-    t_in_final_stage = rt - sacc_final
 
-    fptds = fptd_single(
-        t_in_final_stage,
-        mu_final,
-        sigma,
-        a_final,
-        -b,
-        -a_final,
-        b,
-        xs_final,
-        choice,
-        trunc_num=trunc_num,
-    )
+    def first_stage_last(_):
+        xs_final, ws_final = _symmetric_stage_grid(x_ref_last, w_ref_last, a_starts[1])
+        ws_pv_final = _addm_first_stage_to_grid(
+            xs_final,
+            ws_final,
+            mu0=mu_array[0],
+            sigma=sigma,
+            a=a,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            x0=x0,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return _finish_addm_last_stage(
+            rt - sacc_array[1],
+            choice,
+            mu_final=mu_array[1],
+            sigma=sigma,
+            a_final=a_starts[1],
+            b=b,
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
 
-    if log_space:
-        return jnp.exp(logsumexp(_to_log_space(fptds) + ws_pv_final))
-    return jnp.sum(fptds * ws_pv_final)
+    def first_stage_mid():
+        a_init_mid = a_starts[1]
+        xs_init_mid, ws_init_mid = _symmetric_stage_grid(
+            x_ref_mid, w_ref_mid, a_init_mid
+        )
+        ws_pv_init_mid = _addm_first_stage_to_grid(
+            xs_init_mid,
+            ws_init_mid,
+            mu0=mu_array[0],
+            sigma=sigma,
+            a=a,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            x0=x0,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return xs_init_mid, ws_pv_init_mid
+
+    def middle_stages(carry):
+        if log_space:
+
+            def stage_step(carry, stage_idx):
+                xs_prev_mid, log_ws_pv_prev_mid = carry
+                a_prev_mid = a_starts[stage_idx]
+                a_curr_mid = a_starts[stage_idx + 1]
+                xs_mid = x_ref_mid * a_curr_mid
+                ws_mid = w_ref_mid * a_curr_mid
+                P_mid = q_single(
+                    xs_mid[:, None],
+                    mu_array[stage_idx],
+                    sigma,
+                    a_prev_mid,
+                    upper_slope_array[stage_idx],
+                    -a_prev_mid,
+                    lower_slope_array[stage_idx],
+                    safe_stage_duration_array[stage_idx],
+                    xs_prev_mid[None, :],
+                    trunc_num=trunc_num,
+                )
+                log_pv_mid = logsumexp(
+                    positive_log(P_mid) + log_ws_pv_prev_mid[None, :], axis=1
+                )
+                log_ws_pv_mid = positive_log(ws_mid) + log_pv_mid
+                active = stage_idx < (d - 2)
+                xs_out = jnp.where(active, xs_mid, xs_prev_mid)
+                ws_out = jnp.where(active, log_ws_pv_mid, log_ws_pv_prev_mid)
+                return (xs_out, ws_out), None
+
+        else:
+
+            def stage_step(carry, stage_idx):
+                xs_prev_mid, ws_pv_prev_mid = carry
+                a_prev_mid = a_starts[stage_idx]
+                a_curr_mid = a_starts[stage_idx + 1]
+                xs_mid = x_ref_mid * a_curr_mid
+                ws_mid = w_ref_mid * a_curr_mid
+                P_mid = q_single(
+                    xs_mid[:, None],
+                    mu_array[stage_idx],
+                    sigma,
+                    a_prev_mid,
+                    upper_slope_array[stage_idx],
+                    -a_prev_mid,
+                    lower_slope_array[stage_idx],
+                    safe_stage_duration_array[stage_idx],
+                    xs_prev_mid[None, :],
+                    trunc_num=trunc_num,
+                )
+                pv_mid = P_mid @ ws_pv_prev_mid
+                ws_pv_mid = ws_mid * pv_mid
+                active = stage_idx < (d - 2)
+                xs_out = jnp.where(active, xs_mid, xs_prev_mid)
+                ws_out = jnp.where(active, ws_pv_mid, ws_pv_prev_mid)
+                return (xs_out, ws_out), None
+
+        if max_d > 3:
+            carry, _ = lax.scan(stage_step, carry, jnp.arange(1, max_d - 2))
+        return carry
+
+    def last_stage_from_mid(xs_mid_final, ws_pv_mid_final):
+        last_q_stage_idx = safe_d_idx - 1
+        a_prev_last = a_starts[last_q_stage_idx]
+        a_final = a_starts[safe_d_idx]
+        xs_final = x_ref_last * a_final
+        ws_final = w_ref_last * a_final
+        P_last = q_single(
+            xs_final[:, None],
+            mu_array[last_q_stage_idx],
+            sigma,
+            a_prev_last,
+            upper_slope_array[last_q_stage_idx],
+            -a_prev_last,
+            lower_slope_array[last_q_stage_idx],
+            safe_stage_duration_array[last_q_stage_idx],
+            xs_mid_final[None, :],
+            trunc_num=trunc_num,
+        )
+        ws_pv_final = _apply_transition(P_last, ws_final, ws_pv_mid_final, log_space)
+        return _finish_addm_last_stage(
+            rt - sacc_array[safe_d_idx],
+            choice,
+            mu_final=mu_array[safe_d_idx],
+            sigma=sigma,
+            a_final=a_final,
+            b=b,
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+
+    def multi_stage_from_mid(_):
+        carry = first_stage_mid()
+        xs_mid_final, ws_pv_mid_final = middle_stages(carry)
+        return last_stage_from_mid(xs_mid_final, ws_pv_mid_final)
+
+    return lax.cond(safe_d_idx == 1, first_stage_last, multi_stage_from_mid, operand=None)
 
 
-def compute_addm_fptd_stagescan(
+def compute_addm_logfptd_stagescan(
     rt,
     choice,
     eta,
@@ -913,20 +1216,27 @@ def compute_addm_fptd_stagescan(
     sacc_array,
     d,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
 ):
-    """Public single-trial ADDM stage-scan wrapper.
+    """Public single-trial ADDM log-FPTD stage-scan wrapper.
 
     This is the public stage-scan counterpart to
-    :func:`compute_addm_fptd_precomputed`. Like the rest of the public aDDM
+    :func:`compute_addm_logfptd_precomputed`. Like the rest of the public aDDM
     surface, it accepts the original aDDM parameters and covariates
     ``(eta, kappa, r1, r2, flag)`` rather than a derived ``mu_array``.
 
-    The plain :func:`compute_addm_fptd` alias continues to point to the
+    The plain :func:`compute_addm_logfptd` alias continues to point to the
     precomputed production path.
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
     mu_array = _build_addm_mu_array(
         eta,
         kappa,
@@ -939,7 +1249,7 @@ def compute_addm_fptd_stagescan(
     )
 
     def single_fn(_):
-        return fptd_single(
+        return log_fptd_single(
             rt,
             mu_array[0],
             sigma,
@@ -956,7 +1266,7 @@ def compute_addm_fptd_stagescan(
         return single_fn(None)
 
     def multi_fn(_):
-        return _addm_fptd_stagescan(
+        return _addm_logfptd_stagescan(
             rt,
             choice,
             sigma,
@@ -966,7 +1276,8 @@ def compute_addm_fptd_stagescan(
             mu_array,
             sacc_array,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
         )
@@ -974,7 +1285,7 @@ def compute_addm_fptd_stagescan(
     return lax.cond(d == 1, single_fn, multi_fn, operand=None)
 
 
-def _heterog_multistage_fptd_stagescan(
+def _heterog_multistage_logfptd_stagescan(
     rt,
     choice,
     x0,
@@ -987,29 +1298,27 @@ def _heterog_multistage_fptd_stagescan(
     b2_array,
     d,
     *,
-    order,
+    order_mid,
+    order_last,
     trunc_num,
     log_space,
 ):
-    """Single-trial generalized multistage stage-scan kernel.
+    """Single-trial generalized multistage log-FPTD stage-scan kernel.
 
-    The computation skeleton mirrors :func:`_addm_fptd_stagescan`, but tracks
+    The computation skeleton mirrors :func:`_addm_logfptd_stagescan`, but tracks
     separate upper/lower boundary positions and per-stage sigma values.
 
     Notes
     -----
     This is the public stage-scan counterpart to
-    :func:`_heterog_multistage_fptd_precomputed`. It computes each stage
+    :func:`_heterog_multistage_logfptd_precomputed`. It computes each stage
     transition matrix inside the scan body, which makes the execution order
     closer to the mathematical recurrence and easier to compare against other
     backends.
     """
-    # Reference Gauss-Legendre quadrature on [-1, 1].
-    x_ref, w_ref = get_gauss_legendre_ref(order)
-
     max_d = mu_array.shape[0]
     if max_d < 2:
-        return fptd_single(
+        return log_fptd_single(
             rt,
             mu_array[0],
             sigma_array[0],
@@ -1021,9 +1330,9 @@ def _heterog_multistage_fptd_stagescan(
             choice,
             trunc_num=trunc_num,
         )
+    x_ref_mid, w_ref_mid = get_gauss_legendre_ref(order_mid)
+    x_ref_last, w_ref_last = get_gauss_legendre_ref(order_last)
 
-    # Build stage-local geometry, then place the first interface quadrature
-    # nodes/weights explicitly.
     (
         safe_stage_duration_array,
         upper_slope_array,
@@ -1031,133 +1340,179 @@ def _heterog_multistage_fptd_stagescan(
         ub_starts,
         lb_starts,
     ) = _effective_general_schedule(node_array, d, a1, b1_array, a2, b2_array)
-
-    ub_1 = ub_starts[1]
-    lb_1 = lb_starts[1]
-    half_w_1 = (ub_1 - lb_1) / 2.0
-    center_1 = (ub_1 + lb_1) / 2.0
-    xs_init = x_ref * half_w_1 + center_1
-    ws_init = w_ref * half_w_1
-
-    pv_init = q_single(
-        xs_init,
-        mu_array[0],
-        sigma_array[0],
-        a1,
-        upper_slope_array[0],
-        a2,
-        lower_slope_array[0],
-        safe_stage_duration_array[0],
-        x0,
-        trunc_num=trunc_num,
-    )
-
-    if log_space:
-        ws_pv_init = _to_log_space(ws_init * pv_init)
-    else:
-        ws_pv_init = ws_init * pv_init
-
-    # Carry tracks the current interface nodes, weighted alive-state mass, and
-    # boundary positions at the start of the current stage.
-    carry = (xs_init, ws_pv_init, ub_1, lb_1)
-
-    if log_space:
-
-        def stage_step(carry, stage_idx):
-            xs_prev, log_ws_pv_prev, ub_prev, lb_prev = carry
-            ub_curr = ub_starts[stage_idx + 1]
-            lb_curr = lb_starts[stage_idx + 1]
-            half_w = (ub_curr - lb_curr) / 2.0
-            center = (ub_curr + lb_curr) / 2.0
-            xs = x_ref * half_w + center
-            ws = w_ref * half_w
-            P = q_single(
-                xs[:, None],
-                mu_array[stage_idx],
-                sigma_array[stage_idx],
-                ub_prev,
-                upper_slope_array[stage_idx],
-                lb_prev,
-                lower_slope_array[stage_idx],
-                safe_stage_duration_array[stage_idx],
-                xs_prev[None, :],
-                trunc_num=trunc_num,
-            )
-            log_pv = logsumexp(_to_log_space(P) + log_ws_pv_prev[None, :], axis=1)
-            log_ws_pv = _to_log_space(ws) + log_pv
-            active = stage_idx < (d - 1)
-            xs_out = jnp.where(active, xs, xs_prev)
-            ws_pv_out = jnp.where(active, log_ws_pv, log_ws_pv_prev)
-            ub_out = jnp.where(active, ub_curr, ub_prev)
-            lb_out = jnp.where(active, lb_curr, lb_prev)
-            return (xs_out, ws_pv_out, ub_out, lb_out), None
-
-    else:
-
-        def stage_step(carry, stage_idx):
-            xs_prev, ws_pv_prev, ub_prev, lb_prev = carry
-            ub_curr = ub_starts[stage_idx + 1]
-            lb_curr = lb_starts[stage_idx + 1]
-            half_w = (ub_curr - lb_curr) / 2.0
-            center = (ub_curr + lb_curr) / 2.0
-            xs = x_ref * half_w + center
-            ws = w_ref * half_w
-            P = q_single(
-                xs[:, None],
-                mu_array[stage_idx],
-                sigma_array[stage_idx],
-                ub_prev,
-                upper_slope_array[stage_idx],
-                lb_prev,
-                lower_slope_array[stage_idx],
-                safe_stage_duration_array[stage_idx],
-                xs_prev[None, :],
-                trunc_num=trunc_num,
-            )
-            pv = P @ ws_pv_prev
-            ws_pv = ws * pv
-            active = stage_idx < (d - 1)
-            xs_out = jnp.where(active, xs, xs_prev)
-            ws_pv_out = jnp.where(active, ws_pv, ws_pv_prev)
-            ub_out = jnp.where(active, ub_curr, ub_prev)
-            lb_out = jnp.where(active, lb_curr, lb_prev)
-            return (xs_out, ws_pv_out, ub_out, lb_out), None
-
-    if max_d > 2:
-        carry, _ = lax.scan(stage_step, carry, jnp.arange(1, max_d - 1))
-
-    # Evaluate the observed hit density in the true final stage and reduce over
-    # the latent start-position quadrature grid.
-    xs_final, ws_pv_final, _, _ = carry
     safe_d_idx = jnp.minimum(d - 1, max_d - 1)
-    ub_final = ub_starts[safe_d_idx]
-    lb_final = lb_starts[safe_d_idx]
-    node_final = node_array[safe_d_idx]
-    mu_final = mu_array[safe_d_idx]
-    sigma_final = sigma_array[safe_d_idx]
-    b1_final = b1_array[safe_d_idx]
-    b2_final = b2_array[safe_d_idx]
-    t_in_final_stage = rt - node_final
 
-    fptds = fptd_single(
-        t_in_final_stage,
-        mu_final,
-        sigma_final,
-        ub_final,
-        b1_final,
-        lb_final,
-        b2_final,
-        xs_final,
-        choice,
-        trunc_num=trunc_num,
-    )
+    def first_stage_last(_):
+        xs_final, ws_final = _general_stage_grid(
+            x_ref_last, w_ref_last, ub_starts[1], lb_starts[1]
+        )
+        ws_pv_final = _general_first_stage_to_grid(
+            xs_final,
+            ws_final,
+            x0=x0,
+            mu0=mu_array[0],
+            sigma0=sigma_array[0],
+            upper_start0=a1,
+            lower_start0=a2,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return _finish_general_last_stage(
+            rt - node_array[1],
+            choice,
+            mu_final=mu_array[1],
+            sigma_final=sigma_array[1],
+            ub_final=ub_starts[1],
+            lb_final=lb_starts[1],
+            b1_final=b1_array[1],
+            b2_final=b2_array[1],
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
 
-    if log_space:
-        return jnp.exp(logsumexp(_to_log_space(fptds) + ws_pv_final))
-    return jnp.sum(fptds * ws_pv_final)
+    def first_stage_mid():
+        ub_init_mid = ub_starts[1]
+        lb_init_mid = lb_starts[1]
+        xs_init_mid, ws_init_mid = _general_stage_grid(
+            x_ref_mid, w_ref_mid, ub_init_mid, lb_init_mid
+        )
+        ws_pv_init_mid = _general_first_stage_to_grid(
+            xs_init_mid,
+            ws_init_mid,
+            x0=x0,
+            mu0=mu_array[0],
+            sigma0=sigma_array[0],
+            upper_start0=a1,
+            lower_start0=a2,
+            upper_slope0=upper_slope_array[0],
+            lower_slope0=lower_slope_array[0],
+            stage_duration0=safe_stage_duration_array[0],
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+        return xs_init_mid, ws_pv_init_mid
+
+    def middle_stages(carry):
+        if log_space:
+
+            def stage_step(carry, stage_idx):
+                xs_prev_mid, log_ws_pv_prev_mid = carry
+                ub_prev_mid = ub_starts[stage_idx]
+                lb_prev_mid = lb_starts[stage_idx]
+                ub_curr_mid = ub_starts[stage_idx + 1]
+                lb_curr_mid = lb_starts[stage_idx + 1]
+                half_w_mid = (ub_curr_mid - lb_curr_mid) / 2.0
+                center_mid = (ub_curr_mid + lb_curr_mid) / 2.0
+                xs_mid = x_ref_mid * half_w_mid + center_mid
+                ws_mid = w_ref_mid * half_w_mid
+                P_mid = q_single(
+                    xs_mid[:, None],
+                    mu_array[stage_idx],
+                    sigma_array[stage_idx],
+                    ub_prev_mid,
+                    upper_slope_array[stage_idx],
+                    lb_prev_mid,
+                    lower_slope_array[stage_idx],
+                    safe_stage_duration_array[stage_idx],
+                    xs_prev_mid[None, :],
+                    trunc_num=trunc_num,
+                )
+                log_pv_mid = logsumexp(
+                    positive_log(P_mid) + log_ws_pv_prev_mid[None, :], axis=1
+                )
+                log_ws_pv_mid = positive_log(ws_mid) + log_pv_mid
+                active = stage_idx < (d - 2)
+                xs_out = jnp.where(active, xs_mid, xs_prev_mid)
+                ws_out = jnp.where(active, log_ws_pv_mid, log_ws_pv_prev_mid)
+                return (xs_out, ws_out), None
+
+        else:
+
+            def stage_step(carry, stage_idx):
+                xs_prev_mid, ws_pv_prev_mid = carry
+                ub_prev_mid = ub_starts[stage_idx]
+                lb_prev_mid = lb_starts[stage_idx]
+                ub_curr_mid = ub_starts[stage_idx + 1]
+                lb_curr_mid = lb_starts[stage_idx + 1]
+                half_w_mid = (ub_curr_mid - lb_curr_mid) / 2.0
+                center_mid = (ub_curr_mid + lb_curr_mid) / 2.0
+                xs_mid = x_ref_mid * half_w_mid + center_mid
+                ws_mid = w_ref_mid * half_w_mid
+                P_mid = q_single(
+                    xs_mid[:, None],
+                    mu_array[stage_idx],
+                    sigma_array[stage_idx],
+                    ub_prev_mid,
+                    upper_slope_array[stage_idx],
+                    lb_prev_mid,
+                    lower_slope_array[stage_idx],
+                    safe_stage_duration_array[stage_idx],
+                    xs_prev_mid[None, :],
+                    trunc_num=trunc_num,
+                )
+                pv_mid = P_mid @ ws_pv_prev_mid
+                ws_pv_mid = ws_mid * pv_mid
+                active = stage_idx < (d - 2)
+                xs_out = jnp.where(active, xs_mid, xs_prev_mid)
+                ws_out = jnp.where(active, ws_pv_mid, ws_pv_prev_mid)
+                return (xs_out, ws_out), None
+
+        if max_d > 3:
+            carry, _ = lax.scan(stage_step, carry, jnp.arange(1, max_d - 2))
+        return carry
+
+    def last_stage_from_mid(xs_mid_final, ws_pv_mid_final):
+        last_q_stage_idx = safe_d_idx - 1
+        ub_prev_last = ub_starts[last_q_stage_idx]
+        lb_prev_last = lb_starts[last_q_stage_idx]
+        ub_final = ub_starts[safe_d_idx]
+        lb_final = lb_starts[safe_d_idx]
+        half_w_final = (ub_final - lb_final) / 2.0
+        center_final = (ub_final + lb_final) / 2.0
+        xs_final = x_ref_last * half_w_final + center_final
+        ws_final = w_ref_last * half_w_final
+        P_last = q_single(
+            xs_final[:, None],
+            mu_array[last_q_stage_idx],
+            sigma_array[last_q_stage_idx],
+            ub_prev_last,
+            upper_slope_array[last_q_stage_idx],
+            lb_prev_last,
+            lower_slope_array[last_q_stage_idx],
+            safe_stage_duration_array[last_q_stage_idx],
+            xs_mid_final[None, :],
+            trunc_num=trunc_num,
+        )
+        ws_pv_final = _apply_transition(P_last, ws_final, ws_pv_mid_final, log_space)
+        return _finish_general_last_stage(
+            rt - node_array[safe_d_idx],
+            choice,
+            mu_final=mu_array[safe_d_idx],
+            sigma_final=sigma_array[safe_d_idx],
+            ub_final=ub_starts[safe_d_idx],
+            lb_final=lb_starts[safe_d_idx],
+            b1_final=b1_array[safe_d_idx],
+            b2_final=b2_array[safe_d_idx],
+            xs_final=xs_final,
+            ws_pv_final=ws_pv_final,
+            trunc_num=trunc_num,
+            log_space=log_space,
+        )
+
+    def multi_stage_from_mid(_):
+        carry = first_stage_mid()
+        xs_mid_final, ws_pv_mid_final = middle_stages(carry)
+        return last_stage_from_mid(xs_mid_final, ws_pv_mid_final)
+
+    return lax.cond(safe_d_idx == 1, first_stage_last, multi_stage_from_mid, operand=None)
 
 
-def compute_heterog_multistage_fptd_stagescan(
+def compute_heterog_multistage_logfptd_stagescan(
     rt,
     choice,
     x0,
@@ -1170,20 +1525,27 @@ def compute_heterog_multistage_fptd_stagescan(
     b2_array,
     d,
     *,
-    order=DEFAULT_QUADRATURE_ORDER,
+    order_mid=DEFAULT_MID_QUAD_ORDER,
+    order_last=DEFAULT_LAST_QUAD_ORDER,
+    order=None,
     trunc_num=DEFAULT_TRUNC_NUM,
     log_space=False,
 ):
-    """Public single-trial generalized multistage stage-scan wrapper.
+    """Public single-trial generalized multistage log-FPTD stage-scan wrapper.
 
     This is the public stage-scan counterpart to
-    :func:`compute_heterog_multistage_fptd_precomputed`. The default alias
-    :func:`compute_heterog_multistage_fptd` still points to the precomputed
+    :func:`compute_heterog_multistage_logfptd_precomputed`. The default alias
+    :func:`compute_heterog_multistage_logfptd` still points to the precomputed
     production path.
     """
+    order_mid, order_last = resolve_quadrature_orders(
+        order_mid=order_mid,
+        order_last=order_last,
+        order=order,
+    )
 
     def single_fn(_):
-        return fptd_single(
+        return log_fptd_single(
             rt,
             mu_array[0],
             sigma_array[0],
@@ -1200,7 +1562,7 @@ def compute_heterog_multistage_fptd_stagescan(
         return single_fn(None)
 
     def multi_fn(_):
-        return _heterog_multistage_fptd_stagescan(
+        return _heterog_multistage_logfptd_stagescan(
             rt,
             choice,
             x0,
@@ -1212,7 +1574,8 @@ def compute_heterog_multistage_fptd_stagescan(
             b1_array,
             b2_array,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             log_space=log_space,
         )
@@ -1225,25 +1588,25 @@ def compute_heterog_multistage_fptd_stagescan(
 # ---------------------------------------------------------------------------
 
 
-compute_addm_fptd_precomputed_jit = jit(
-    compute_addm_fptd_precomputed,
-    static_argnames=("order", "trunc_num", "log_space"),
+compute_addm_logfptd_precomputed_jit = jit(
+    compute_addm_logfptd_precomputed,
+    static_argnames=("order_mid", "order_last", "order", "trunc_num", "log_space"),
 )
-compute_addm_fptd_stagescan_jit = jit(
-    compute_addm_fptd_stagescan,
-    static_argnames=("order", "trunc_num", "log_space"),
+compute_addm_logfptd_stagescan_jit = jit(
+    compute_addm_logfptd_stagescan,
+    static_argnames=("order_mid", "order_last", "order", "trunc_num", "log_space"),
 )
-compute_heterog_multistage_fptd_precomputed_jit = jit(
-    compute_heterog_multistage_fptd_precomputed,
-    static_argnames=("order", "trunc_num", "log_space"),
+compute_heterog_multistage_logfptd_precomputed_jit = jit(
+    compute_heterog_multistage_logfptd_precomputed,
+    static_argnames=("order_mid", "order_last", "order", "trunc_num", "log_space"),
 )
-compute_heterog_multistage_fptd_stagescan_jit = jit(
-    compute_heterog_multistage_fptd_stagescan,
-    static_argnames=("order", "trunc_num", "log_space"),
+compute_heterog_multistage_logfptd_stagescan_jit = jit(
+    compute_heterog_multistage_logfptd_stagescan,
+    static_argnames=("order_mid", "order_last", "order", "trunc_num", "log_space"),
 )
 
 # Plain names keep pointing to the production precomputed kernels.
-compute_addm_fptd = compute_addm_fptd_precomputed
-compute_addm_fptd_jit = compute_addm_fptd_precomputed_jit
-compute_heterog_multistage_fptd = compute_heterog_multistage_fptd_precomputed
-compute_heterog_multistage_fptd_jit = compute_heterog_multistage_fptd_precomputed_jit
+compute_addm_logfptd = compute_addm_logfptd_precomputed
+compute_addm_logfptd_jit = compute_addm_logfptd_precomputed_jit
+compute_heterog_multistage_logfptd = compute_heterog_multistage_logfptd_precomputed
+compute_heterog_multistage_logfptd_jit = compute_heterog_multistage_logfptd_precomputed_jit

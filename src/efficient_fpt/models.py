@@ -9,10 +9,12 @@ from .validation import check_multistage_params
 from .validation import check_addm_params, check_single_stage_params
 from ._defaults import (
     DEFAULT_CHUNK_SIZE,
-    DEFAULT_QUADRATURE_ORDER,
+    DEFAULT_LAST_QUAD_ORDER,
+    DEFAULT_MID_QUAD_ORDER,
     DEFAULT_TRUNC_NUM,
     DEFAULT_THRESHOLD,
 )
+from .utils import resolve_quadrature_orders
 
 
 def _initialize_x0(x0, lower_bdy_t0, upper_bdy_t0, num, rng=None):
@@ -574,7 +576,7 @@ class aDDModel:
 
         return rt_all, choice_all, x_final_all
 
-    def fptd(
+    def log_fptd(
         self,
         rt,
         choice,
@@ -583,12 +585,14 @@ class aDDModel:
         flag,
         sacc_array,
         d,
-        order=DEFAULT_QUADRATURE_ORDER,
+        order_mid=DEFAULT_MID_QUAD_ORDER,
+        order_last=DEFAULT_LAST_QUAD_ORDER,
+        order=None,
         trunc_num=DEFAULT_TRUNC_NUM,
         threshold=DEFAULT_THRESHOLD,
         log_space=False,
     ):
-        """First-passage time density for a single trial configuration.
+        """Log first-passage time density for a single trial configuration.
 
         Parameters
         ----------
@@ -604,18 +608,23 @@ class aDDModel:
             Saccade onset times.
         d : int
             Number of valid stages.
-        order : int
-            Gauss-Legendre quadrature order.
+        order_mid, order_last : int
+            Intermediate and final-stage Gauss-Legendre quadrature orders.
 
         Returns
         -------
         float
-            FPTD value at time *rt*.
+            Log FPTD value at time *rt*.
         """
-        from .cython.multi_stage import compute_addm_fptd
+        from .cython.multi_stage import compute_addm_logfptd
 
         sacc_array = np.asarray(sacc_array, dtype=np.float64)
-        return compute_addm_fptd(
+        order_mid, order_last = resolve_quadrature_orders(
+            order_mid=order_mid,
+            order_last=order_last,
+            order=order,
+        )
+        return compute_addm_logfptd(
             rt,
             choice,
             self.eta,
@@ -629,7 +638,8 @@ class aDDModel:
             flag,
             sacc_array,
             d,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             threshold=threshold,
             log_space=log_space,
@@ -644,11 +654,14 @@ class aDDModel:
         flag_data,
         sacc_array_data,
         d_data,
-        order=DEFAULT_QUADRATURE_ORDER,
+        order_mid=DEFAULT_MID_QUAD_ORDER,
+        order_last=DEFAULT_LAST_QUAD_ORDER,
+        order=None,
         trunc_num=DEFAULT_TRUNC_NUM,
         threshold=DEFAULT_THRESHOLD,
-        n_threads=-1,
+        n_threads=1,
         log_space=False,
+        invalid_policy="inf",
         warn=True,
     ):
         """Mean negative log-likelihood over observed trials.
@@ -667,8 +680,8 @@ class aDDModel:
             0 = fixate item 1 first, 1 = fixate item 2 first.
         sacc_array_data : ndarray (n_trials, max_d)
         d_data : ndarray (n_trials,) int
-        order : int
-            Gauss-Legendre quadrature order.
+        order_mid, order_last : int
+            Intermediate and final-stage Gauss-Legendre quadrature orders.
         trunc_num : int
             Series truncation limit.
         threshold : float
@@ -678,6 +691,9 @@ class aDDModel:
         log_space : bool
             If True, compute likelihoods in log space internally before
             returning the mean negative log-likelihood.
+        invalid_policy : {"inf", "warn"}
+            ``"inf"`` propagates bad trials to ``+inf`` or ``NaN``.
+            ``"warn"`` warns and skips them.
         warn : bool
             If True, emit warnings for skipped trials with invalid or zero
             likelihoods.
@@ -689,6 +705,11 @@ class aDDModel:
         """
         from .cython.batch import compute_addm_nll
 
+        order_mid, order_last = resolve_quadrature_orders(
+            order_mid=order_mid,
+            order_last=order_last,
+            order=order,
+        )
         return compute_addm_nll(
             rt_data,
             choice_data,
@@ -703,11 +724,13 @@ class aDDModel:
             flag_data,
             sacc_array_data,
             d_data,
-            order=order,
+            order_mid=order_mid,
+            order_last=order_last,
             trunc_num=trunc_num,
             threshold=threshold,
             n_threads=n_threads,
             log_space=log_space,
+            invalid_policy=invalid_policy,
             reduce="mean",
             warn=warn,
         )
@@ -756,7 +779,7 @@ class aDDModel:
         dt=1e-4,
         T=20.0,
         n_threads=1,
-        random_state=None,
+        rng=None,
         chunk_size=None,
     ):
         """Simulate *n_trials* of the attentional drift diffusion model.
@@ -778,23 +801,29 @@ class aDDModel:
             Maximum trial duration (seconds).
         n_threads : int
             Number of OpenMP threads for the Cython simulator (1 = serial).
-        random_state : int or None
-            Seed for reproducibility.
+        rng : int, np.random.Generator, or None
+            Seed or Generator for reproducibility.
         chunk_size : int or None
             Trials processed per Cython call (controls peak memory).
 
         Returns
         -------
-        dict with keys:
-            rt_data, choice_data, r1_data, r2_data, flag_data,
-            sacc_array_data, d_data, params.
+        dict
+            Grouped canonical aDDM experiment payload with the same schema used
+            by :func:`efficient_fpt.io.save_addm_experiment` when persisted to
+            the canonical `.npz` experiment archive:
+
+            - ``decision_data``: ``rt_data``, ``choice_data``
+            - ``params``: model parameters shared across trials
+            - ``covariates``: per-trial stimulus/fixation inputs
+            - ``config``: simulation/generation settings
         """
         from .addm_helpers import _generate_sacc_array_data
 
         if chunk_size is None:
             chunk_size = DEFAULT_CHUNK_SIZE
 
-        rng = np.random.default_rng(random_state)
+        rng = np.random.default_rng(rng)
 
         # --- Stimulus values ---
         r1_data = rng.integers(r_range[0], r_range[1] + 1, size=n_trials)
@@ -839,13 +868,10 @@ class aDDModel:
         sacc_array_data = sacc_array_data[:, :max_d]
 
         return {
-            "rt_data": np.ascontiguousarray(rt_all, dtype=np.float64),
-            "choice_data": np.ascontiguousarray(choice_all, dtype=np.int32),
-            "r1_data": np.ascontiguousarray(r1_data),
-            "r2_data": np.ascontiguousarray(r2_data),
-            "flag_data": np.ascontiguousarray(flag_data, dtype=np.int32),
-            "sacc_array_data": np.ascontiguousarray(sacc_array_data, dtype=np.float64),
-            "d_data": np.ascontiguousarray(d_data, dtype=np.int32),
+            "decision_data": {
+                "rt_data": np.ascontiguousarray(rt_all, dtype=np.float64),
+                "choice_data": np.ascontiguousarray(choice_all, dtype=np.int32),
+            },
             "params": {
                 "eta": self.eta,
                 "kappa": self.kappa,
@@ -853,6 +879,17 @@ class aDDModel:
                 "a": self.a,
                 "b": self.b,
                 "x0": self.x0,
+            },
+            "covariates": {
+                "r1_data": np.ascontiguousarray(r1_data),
+                "r2_data": np.ascontiguousarray(r2_data),
+                "flag_data": np.ascontiguousarray(flag_data, dtype=np.int32),
+                "sacc_array_data": np.ascontiguousarray(
+                    sacc_array_data, dtype=np.float64
+                ),
+                "d_data": np.ascontiguousarray(d_data, dtype=np.int32),
+            },
+            "config": {
                 "dt": dt,
                 "T": T,
                 "gamma_shape": gamma_shape,

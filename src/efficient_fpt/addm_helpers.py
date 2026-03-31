@@ -101,7 +101,7 @@ def _generate_sacc_array_data(
     """Generate padded saccade-time arrays and per-trial stage counts.
 
     Returns (sacc_array_data, d_data, max_d).
-    `sacc_array_data` is of shape(n_trials, max_d), of whichonly the first `d` columns are active.
+    `sacc_array_data` is of shape(n_trials, max_d), of which only the first `d` columns are active.
     d=1 corresponds to no saccades by time `T`, and the active sacc_array would be just [0.0].
     """
     avg_fixation = gamma_shape * gamma_scale

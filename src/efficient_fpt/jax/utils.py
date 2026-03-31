@@ -66,10 +66,20 @@ def get_jax_dtype():
     return _dtype
 
 
+def positive_log(values):
+    """Return log(x) for x > 0, -inf for x <= 0, and nan when x is nan."""
+    values = jnp.asarray(values, dtype=_dtype)
+    safe = jnp.where(values > 0.0, values, 1.0)
+    logs = jnp.where(values > 0.0, jnp.log(safe), -jnp.inf)
+    return jnp.where(jnp.isnan(values), jnp.nan, logs)
+
+
 # ---------------------------------------------------------------------------
 # Gauss-Legendre quadrature
 # ---------------------------------------------------------------------------
 
+# These module-level constants are JAX arrays, which are immutable by design
+# (item assignment raises TypeError), so no additional write-protection is needed.
 GAUSS_LEGENDRE_30_X = None
 GAUSS_LEGENDRE_30_W = None
 _refresh_quadrature_constants()
@@ -80,8 +90,13 @@ _QUAD_CACHE = {}
 def get_gauss_legendre_ref(order: int):
     """Return (x_ref, w_ref) on [-1, 1] as JAX arrays for the given order.
 
-    Results are cached so repeated calls with the same order are free.
-    Cache is cleared when precision is changed via :func:`set_jax_precision`.
+    The shared cache stores NumPy reference arrays, not JAX arrays. This is
+    important because ``get_gauss_legendre_ref(...)`` is called from jitted /
+    transformed code paths. Storing ``jnp.array(...)`` results in global state
+    during tracing can leak tracers and break later JAX transforms.
+
+    Precision changes are handled at the conversion boundary by casting the
+    cached NumPy arrays to the current JAX dtype on return.
 
     Parameters
     ----------
@@ -101,9 +116,8 @@ def get_gauss_legendre_ref(order: int):
             np.asarray(x_np, dtype=np.float64),
             np.asarray(w_np, dtype=np.float64),
         )
-
     x_np, w_np = _QUAD_CACHE[order]
-    return jnp.array(x_np, dtype=_dtype), jnp.array(w_np, dtype=_dtype)
+    return jnp.asarray(x_np, dtype=_dtype), jnp.asarray(w_np, dtype=_dtype)
 
 
 def lgwt_lookup_table(order: int, a: float, b: float):

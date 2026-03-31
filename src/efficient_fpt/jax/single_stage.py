@@ -13,7 +13,7 @@ boundaries. Sequential analysis, 16(4), 345-352.
 """
 
 import jax.numpy as jnp
-from .utils import get_jax_dtype
+from .utils import get_jax_dtype, positive_log
 
 
 def fptd_basic(t, mu, a1, b1, a2, b2, bdy, *, trunc_num=100):
@@ -92,7 +92,7 @@ def fptd_basic(t, mu, a1, b1, a2, b2, bdy, *, trunc_num=100):
     b_expanded = jnp.expand_dims(b, axis=-1)
 
     j = jnp.arange(trunc_num)  # (trunc_num,)
-    sign_j = (-1.0) ** j
+    sign_j = jnp.where(j % 2 == 0, 1.0, -1.0)
 
     # rj computation with proper broadcasting
     rj = (j + 0.5) * c_expanded + bdy * sign_j * a_bar_expanded  # (..., trunc_num)
@@ -340,4 +340,30 @@ def q_single(x, mu, sigma, a1, b1, a2, b2, T, x0, *, trunc_num=100):
             trunc_num=trunc_num,
         )
         / sigma
+    )
+
+
+def log_fptd_basic(t, mu, a1, b1, a2, b2, bdy, *, trunc_num=100):
+    """Safe log of :func:`fptd_basic`."""
+    return positive_log(
+        fptd_basic(t, mu, a1, b1, a2, b2, bdy, trunc_num=trunc_num)
+    )
+
+
+def log_q_basic(x, mu, a1, b1, a2, b2, T, *, trunc_num=100):
+    """Safe log of :func:`q_basic`."""
+    return positive_log(q_basic(x, mu, a1, b1, a2, b2, T, trunc_num=trunc_num))
+
+
+def log_fptd_single(t, mu, sigma, a1, b1, a2, b2, x0, bdy, *, trunc_num=100):
+    """Safe log of :func:`fptd_single`."""
+    return positive_log(
+        fptd_single(t, mu, sigma, a1, b1, a2, b2, x0, bdy, trunc_num=trunc_num)
+    )
+
+
+def log_q_single(x, mu, sigma, a1, b1, a2, b2, T, x0, *, trunc_num=100):
+    """Safe log of :func:`q_single`."""
+    return positive_log(
+        q_single(x, mu, sigma, a1, b1, a2, b2, T, x0, trunc_num=trunc_num)
     )
