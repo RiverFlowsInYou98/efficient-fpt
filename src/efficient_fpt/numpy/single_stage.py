@@ -2,6 +2,7 @@ from numpy import exp, sqrt, pi
 import numpy as np
 
 from .._defaults import DEFAULT_TRUNC_NUM, DEFAULT_THRESHOLD
+from .utils import positive_log
 
 """
 Reference:
@@ -13,7 +14,6 @@ def _scalar_or_array(out):
     """Cast to float64 and unwrap 0-d arrays to Python float."""
     out = np.asarray(out, dtype=np.float64)
     return float(out) if out.ndim == 0 else out
-
 
 def fptd_basic(
     t,
@@ -234,4 +234,132 @@ def q_single(
             adaptive_stopping=adaptive_stopping,
         )
         / sigma
+    )
+
+
+def log_fptd_basic(
+    t,
+    mu,
+    a1,
+    b1,
+    a2,
+    b2,
+    bdy,
+    *,
+    trunc_num=DEFAULT_TRUNC_NUM,
+    threshold=DEFAULT_THRESHOLD,
+    adaptive_stopping=True,
+):
+    """Safe log of :func:`fptd_basic`."""
+    return positive_log(
+        fptd_basic(
+            t,
+            mu,
+            a1,
+            b1,
+            a2,
+            b2,
+            bdy,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            adaptive_stopping=adaptive_stopping,
+        )
+    )
+
+
+def log_q_basic(
+    x,
+    mu,
+    a1,
+    b1,
+    a2,
+    b2,
+    T,
+    *,
+    trunc_num=DEFAULT_TRUNC_NUM,
+    threshold=DEFAULT_THRESHOLD,
+    adaptive_stopping=True,
+):
+    """Safe log of :func:`q_basic`."""
+    return positive_log(
+        q_basic(
+            x,
+            mu,
+            a1,
+            b1,
+            a2,
+            b2,
+            T,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            adaptive_stopping=adaptive_stopping,
+        )
+    )
+
+
+def log_fptd_single(
+    t,
+    mu,
+    sigma,
+    a1,
+    b1,
+    a2,
+    b2,
+    x0,
+    bdy,
+    *,
+    trunc_num=DEFAULT_TRUNC_NUM,
+    threshold=DEFAULT_THRESHOLD,
+    adaptive_stopping=True,
+):
+    """Safe log of :func:`fptd_single`."""
+    return positive_log(
+        fptd_single(
+            t,
+            mu,
+            sigma,
+            a1,
+            b1,
+            a2,
+            b2,
+            x0,
+            bdy,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            adaptive_stopping=adaptive_stopping,
+        )
+    )
+
+
+def log_q_single(
+    x,
+    mu,
+    sigma,
+    a1,
+    b1,
+    a2,
+    b2,
+    T,
+    x0,
+    *,
+    trunc_num=DEFAULT_TRUNC_NUM,
+    threshold=DEFAULT_THRESHOLD,
+    adaptive_stopping=True,
+):
+    """Safe log of :func:`q_single`."""
+    return positive_log(
+        q_single(
+            x,
+            mu,
+            sigma,
+            a1,
+            b1,
+            a2,
+            b2,
+            T,
+            x0,
+            trunc_num=trunc_num,
+            threshold=threshold,
+            adaptive_stopping=adaptive_stopping,
+        )
     )
