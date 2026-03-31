@@ -6,14 +6,15 @@ import numpy as np
 def try_import_cython_multi_stage():
     """Try importing Cython multi_stage functions.
 
-    Returns (compute_addm_fptd, compute_heterog_multistage_fptd) or (None, None).
+    Returns (compute_addm_logfptd, compute_heterog_multistage_logfptd)
+    or (None, None).
     """
     try:
         from efficient_fpt.cython.multi_stage import (
-            compute_addm_fptd,
-            compute_heterog_multistage_fptd,
+            compute_addm_logfptd,
+            compute_heterog_multistage_logfptd,
         )
-        return compute_addm_fptd, compute_heterog_multistage_fptd
+        return compute_addm_logfptd, compute_heterog_multistage_logfptd
     except ImportError:
         return None, None
 

@@ -244,8 +244,8 @@ class TestBatchNLLCrossBackend:
         ))
 
         # Cython uses adaptive stopping; JAX uses fixed-length series.
-        # Expect same order of magnitude, not exact match.
-        np.testing.assert_allclose(cy_result, jax_result, rtol=0.5)
+        # Both use the same quadrature order and should agree closely.
+        np.testing.assert_allclose(cy_result, jax_result, rtol=0.05)
 
     def test_compute_addm_nll_sum(self):
         """Sum reduction should also agree."""
@@ -285,4 +285,4 @@ class TestBatchNLLCrossBackend:
             warn=False, reduce="sum",
         ))
 
-        np.testing.assert_allclose(cy_result, jax_result, rtol=0.5)
+        np.testing.assert_allclose(cy_result, jax_result, rtol=0.05)

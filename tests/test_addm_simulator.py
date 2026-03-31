@@ -8,17 +8,27 @@ excluded from the test suite.
 import numpy as np
 import pytest
 
-from efficient_fpt.models import aDDModel, MultiStageModel
+pytest.importorskip("efficient_fpt.cython.simulator")
+
+from efficient_fpt.models import aDDModel, MultiStageModel, SingleStageModel
 from efficient_fpt.cython.simulator import (
     _simulate_addm_fpt,
     simulate_homog_ddm_fpt,
 )
-from efficient_fpt.models import SingleStageModel
 
 
 def _expected_addm_mu_array(mu1, mu2, flag, d):
     first, second = (mu1, mu2) if flag == 0 else (mu2, mu1)
     return np.where(np.arange(d) % 2 == 0, first, second)
+
+
+def _generated_parts(result):
+    return (
+        result["decision_data"],
+        result["covariates"],
+        result["params"],
+        result["config"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -35,21 +45,26 @@ class TestSimulateAddm:
             n_trials=24,
             dt=1e-2,
             T=4.0,
-            random_state=42,
+            rng=42,
         )
-        assert result["rt_data"].shape == (24,)
-        assert result["choice_data"].shape == (24,)
-        terminated = result["rt_data"] > 0
+        decision, *_ = _generated_parts(result)
+        assert decision["rt_data"].shape == (24,)
+        assert decision["choice_data"].shape == (24,)
+        terminated = decision["rt_data"] > 0
         assert terminated.sum() >= 8
-        assert set(np.unique(result["choice_data"][terminated])).issubset({-1, 1})
+        assert set(np.unique(decision["choice_data"][terminated])).issubset({-1, 1})
 
     def test_reproducibility(self):
         model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25, x0=0.0)
-        kwargs = dict(n_trials=24, dt=1e-2, T=4.0, random_state=12345)
+        kwargs = dict(n_trials=24, dt=1e-2, T=4.0, rng=12345)
         r1 = model.generate_experiment(**kwargs)
         r2 = model.generate_experiment(**kwargs)
-        np.testing.assert_array_equal(r1["rt_data"], r2["rt_data"])
-        np.testing.assert_array_equal(r1["choice_data"], r2["choice_data"])
+        decision1, *_ = _generated_parts(r1)
+        decision2, *_ = _generated_parts(r2)
+        np.testing.assert_array_equal(decision1["rt_data"], decision2["rt_data"])
+        np.testing.assert_array_equal(
+            decision1["choice_data"], decision2["choice_data"]
+        )
 
     def test_flat_boundaries(self):
         """b=0 gives constant boundaries."""
@@ -58,9 +73,10 @@ class TestSimulateAddm:
             n_trials=24,
             dt=1e-2,
             T=4.0,
-            random_state=7,
+            rng=7,
         )
-        terminated = result["rt_data"] > 0
+        decision, *_ = _generated_parts(result)
+        terminated = decision["rt_data"] > 0
         assert terminated.sum() >= 8
 
     def test_n_threads(self):
@@ -71,9 +87,10 @@ class TestSimulateAddm:
             dt=1e-2,
             T=4.0,
             n_threads=2,
-            random_state=42,
+            rng=42,
         )
-        terminated = result["rt_data"] > 0
+        decision, *_ = _generated_parts(result)
+        terminated = decision["rt_data"] > 0
         assert terminated.sum() >= 8
 
     def test_output_format(self):
@@ -82,17 +99,21 @@ class TestSimulateAddm:
             n_trials=16,
             dt=1e-2,
             T=3.0,
-            random_state=0,
+            rng=0,
         )
-        assert "rt_data" in result
-        assert "choice_data" in result
-        assert "sacc_array_data" in result
-        assert "d_data" in result
-        assert "r1_data" in result
-        assert "r2_data" in result
-        assert "flag_data" in result
-        assert "params" in result
-        assert result["sacc_array_data"].shape[0] == 16
+        decision, covariates, params, config = _generated_parts(result)
+        assert set(result) == {"decision_data", "params", "covariates", "config"}
+        assert set(decision) == {"rt_data", "choice_data"}
+        assert set(covariates) == {
+            "r1_data",
+            "r2_data",
+            "flag_data",
+            "sacc_array_data",
+            "d_data",
+        }
+        assert set(params) == {"eta", "kappa", "sigma", "a", "b", "x0"}
+        assert set(config) == {"dt", "T", "gamma_shape", "gamma_scale", "r_range"}
+        assert covariates["sacc_array_data"].shape[0] == 16
 
     def test_returned_trial_metadata_is_self_consistent(self):
         model = aDDModel(eta=0.5, kappa=0.01, sigma=1.0, a=1.5, b=0.25, x0=0.0)
@@ -100,17 +121,20 @@ class TestSimulateAddm:
             n_trials=18,
             dt=1e-2,
             T=4.0,
-            random_state=7,
+            rng=7,
+        )
+        decision, covariates, params, config = _generated_parts(result)
+
+        assert set(np.unique(decision["choice_data"])).issubset({-1, 0, 1})
+        np.testing.assert_array_equal(
+            decision["choice_data"] != 0, decision["rt_data"] > 0
         )
 
-        assert set(np.unique(result["choice_data"])).issubset({-1, 0, 1})
-        np.testing.assert_array_equal(result["choice_data"] != 0, result["rt_data"] > 0)
-
-        for trial in range(len(result["rt_data"])):
-            d = int(result["d_data"][trial])
-            rt = result["rt_data"][trial]
-            choice = int(result["choice_data"][trial])
-            sacc = result["sacc_array_data"][trial, :d]
+        for trial in range(len(decision["rt_data"])):
+            d = int(covariates["d_data"][trial])
+            rt = decision["rt_data"][trial]
+            choice = int(decision["choice_data"][trial])
+            sacc = covariates["sacc_array_data"][trial, :d]
             positive_sacc = sacc[1:][sacc[1:] > 0]
 
             assert d >= 1
@@ -118,14 +142,14 @@ class TestSimulateAddm:
             if positive_sacc.size:
                 assert np.all(np.diff(positive_sacc) > 0)
 
-            eta = result["params"]["eta"]
-            kappa = result["params"]["kappa"]
-            r1 = result["r1_data"][trial]
-            r2 = result["r2_data"][trial]
+            eta = params["eta"]
+            kappa = params["kappa"]
+            r1 = covariates["r1_data"][trial]
+            r2 = covariates["r2_data"][trial]
             mu1 = kappa * (r1 - eta * r2)
             mu2 = kappa * (eta * r1 - r2)
             expected_mu = _expected_addm_mu_array(
-                mu1, mu2, int(result["flag_data"][trial]), d
+                mu1, mu2, int(covariates["flag_data"][trial]), d
             )
             assert expected_mu.shape == (d,)
 
@@ -135,7 +159,7 @@ class TestSimulateAddm:
             else:
                 assert rt == -1.0
                 assert choice == 0
-                assert np.all(positive_sacc < result["params"]["T"])
+                assert np.all(positive_sacc < config["T"])
 
 
 class TestaDDModelClass:

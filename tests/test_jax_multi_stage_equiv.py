@@ -8,19 +8,21 @@ import jax.numpy as jnp
 from jax import grad, value_and_grad
 
 from efficient_fpt.jax.batch import (
-    compute_addm_likelihoods_batchscan,
-    compute_addm_likelihoods_batchvmap,
-    make_addm_nll_function_batchvmap,
-    compute_addm_likelihoods,
-    compute_addm_likelihoods_jit,
+    compute_addm_loglikelihoods,
+    compute_addm_loglikelihoods_batchscan,
+    compute_addm_loglikelihoods_batchvmap,
+    compute_addm_loglikelihoods_jit,
     make_addm_nll_function,
     make_addm_nll_function_batchscan,
+    make_addm_nll_function_batchvmap,
 )
 from efficient_fpt.jax.multi_stage import (
-    compute_addm_fptd,
-    compute_addm_fptd_jit,
-    compute_heterog_multistage_fptd,
-    compute_heterog_multistage_fptd_jit,
+    compute_addm_logfptd,
+    compute_addm_logfptd_stagescan,
+    compute_addm_logfptd_jit,
+    compute_heterog_multistage_logfptd,
+    compute_heterog_multistage_logfptd_stagescan,
+    compute_heterog_multistage_logfptd_jit,
 )
 
 
@@ -52,8 +54,36 @@ def _addm_public_batch_inputs():
     )
 
 
+def _addm_public_batch_inputs_max_d2():
+    rt_data = jnp.array([0.9, 1.4, 1.8], dtype=jnp.float64)
+    choice_data = jnp.array([1, -1, 1], dtype=jnp.int32)
+    r1_data = jnp.array([0.45, 0.30, 0.20], dtype=jnp.float64)
+    r2_data = jnp.array([0.10, 0.55, 0.40], dtype=jnp.float64)
+    flag_data = jnp.array([0, 1, 0], dtype=jnp.int32)
+    sacc_array_data = jnp.array(
+        [
+            [0.0, 0.0],
+            [0.0, 0.7],
+            [0.0, 0.8],
+        ],
+        dtype=jnp.float64,
+    )
+    d_data = jnp.array([1, 2, 2], dtype=jnp.int32)
+    params = dict(eta=0.25, kappa=1.1, sigma=1.0, a=1.6, b=0.25, x0=0.0)
+    return (
+        rt_data,
+        choice_data,
+        r1_data,
+        r2_data,
+        flag_data,
+        sacc_array_data,
+        d_data,
+        params,
+    )
+
+
 class TestJaxAddmBatch:
-    def test_compute_addm_likelihoods_matches_scalar_loop(self):
+    def test_compute_addm_loglikelihoods_matches_scalar_loop(self):
         (
             rt_data,
             choice_data,
@@ -66,7 +96,7 @@ class TestJaxAddmBatch:
         ) = _addm_public_batch_inputs()
 
         batch_vals = np.asarray(
-            compute_addm_likelihoods(
+            compute_addm_loglikelihoods(
                 rt_data,
                 choice_data,
                 params["eta"],
@@ -88,7 +118,7 @@ class TestJaxAddmBatch:
 
         scalar_vals = np.asarray(
             [
-                compute_addm_fptd(
+                compute_addm_logfptd(
                     float(rt_data[i]),
                     int(choice_data[i]),
                     params["eta"],
@@ -114,9 +144,9 @@ class TestJaxAddmBatch:
 
     @pytest.mark.parametrize(
         "fn",
-        [compute_addm_likelihoods_batchvmap, compute_addm_likelihoods_batchscan],
+        [compute_addm_loglikelihoods_batchvmap, compute_addm_loglikelihoods_batchscan],
     )
-    def test_use_remat_preserves_batch_likelihoods(self, fn):
+    def test_use_remat_preserves_batch_loglikelihoods(self, fn):
         (
             rt_data,
             choice_data,
@@ -173,7 +203,7 @@ class TestJaxAddmBatch:
 
         np.testing.assert_allclose(remat, base, rtol=1e-8, atol=1e-10)
 
-    def test_compute_addm_likelihoods_jit_matches_nonjit(self):
+    def test_compute_addm_loglikelihoods_jit_matches_nonjit(self):
         (
             rt_data,
             choice_data,
@@ -186,7 +216,7 @@ class TestJaxAddmBatch:
         ) = _addm_public_batch_inputs()
 
         expected = np.asarray(
-            compute_addm_likelihoods(
+            compute_addm_loglikelihoods(
                 rt_data,
                 choice_data,
                 params["eta"],
@@ -206,7 +236,7 @@ class TestJaxAddmBatch:
             )
         )
         actual = np.asarray(
-            compute_addm_likelihoods_jit(
+            compute_addm_loglikelihoods_jit(
                 rt_data,
                 choice_data,
                 params["eta"],
@@ -227,6 +257,90 @@ class TestJaxAddmBatch:
         )
 
         np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)
+
+    @pytest.mark.parametrize("log_space", [False, True])
+    def test_batchscan_max_d_two_matches_scalar_loop_and_jit(self, log_space):
+        (
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            params,
+        ) = _addm_public_batch_inputs_max_d2()
+
+        expected = np.asarray(
+            [
+                compute_addm_logfptd(
+                    float(rt_data[i]),
+                    int(choice_data[i]),
+                    params["eta"],
+                    params["kappa"],
+                    params["sigma"],
+                    params["a"],
+                    params["b"],
+                    params["x0"],
+                    float(r1_data[i]),
+                    float(r2_data[i]),
+                    int(flag_data[i]),
+                    sacc_array_data[i],
+                    int(d_data[i]),
+                    order_mid=14,
+                    order_last=18,
+                    trunc_num=25,
+                    log_space=log_space,
+                )
+                for i in range(len(rt_data))
+            ]
+        )
+
+        actual = np.asarray(
+            compute_addm_loglikelihoods_batchscan(
+                rt_data,
+                choice_data,
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order_mid=14,
+                order_last=18,
+                trunc_num=25,
+                log_space=log_space,
+            )
+        )
+        jit_actual = np.asarray(
+            compute_addm_loglikelihoods_jit(
+                rt_data,
+                choice_data,
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order_mid=14,
+                order_last=18,
+                trunc_num=25,
+                log_space=log_space,
+            )
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(jit_actual, expected, rtol=1e-8, atol=1e-10)
 
     def test_make_addm_nll_function_matches_legacy_vmap_gradients(self):
         (
@@ -360,12 +474,49 @@ class TestJaxAddmBatch:
             np.asarray(remat_grad), np.asarray(base_grad), rtol=1e-7, atol=1e-9
         )
 
+    def test_invalid_policy_inf_returns_infinity(self):
+        (
+            rt_data,
+            choice_data,
+            r1_data,
+            r2_data,
+            flag_data,
+            sacc_array_data,
+            d_data,
+            params,
+        ) = _addm_public_batch_inputs()
+        bad_rt_data = rt_data.at[1].set(50.0)
+
+        loss = float(
+            make_addm_nll_function(
+                bad_rt_data,
+                choice_data,
+                r1_data,
+                r2_data,
+                flag_data,
+                sacc_array_data,
+                d_data,
+                order=20,
+                trunc_num=25,
+                log_space=True,
+                invalid_policy="inf",
+            )(
+                params["eta"],
+                params["kappa"],
+                params["sigma"],
+                params["a"],
+                params["b"],
+                params["x0"],
+            )
+        )
+        assert np.isinf(loss)
+
 
 class TestJaxScalarJit:
-    def test_compute_addm_fptd_jit_matches_nonjit(self):
+    def test_compute_addm_logfptd_jit_matches_nonjit(self):
         sacc_array = jnp.array([0.0, 0.7, 1.2, 0.0], dtype=jnp.float64)
         expected = float(
-            compute_addm_fptd(
+            compute_addm_logfptd(
                 1.7,
                 1,
                 0.25,
@@ -385,7 +536,7 @@ class TestJaxScalarJit:
             )
         )
         actual = float(
-            compute_addm_fptd_jit(
+            compute_addm_logfptd_jit(
                 1.7,
                 1,
                 0.25,
@@ -407,9 +558,108 @@ class TestJaxScalarJit:
 
         np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)
 
+    @pytest.mark.parametrize("log_space", [False, True])
+    def test_addm_d2_precomputed_matches_stagescan_with_split_orders(self, log_space):
+        sacc_array = jnp.array([0.0, 0.7], dtype=jnp.float64)
+        expected = float(
+            compute_addm_logfptd(
+                1.4,
+                1,
+                0.25,
+                1.1,
+                1.0,
+                1.5,
+                0.3,
+                0.0,
+                0.4,
+                0.2,
+                0,
+                sacc_array,
+                2,
+                order_mid=14,
+                order_last=18,
+                trunc_num=25,
+                log_space=log_space,
+            )
+        )
+        actual = float(
+            compute_addm_logfptd_stagescan(
+                1.4,
+                1,
+                0.25,
+                1.1,
+                1.0,
+                1.5,
+                0.3,
+                0.0,
+                0.4,
+                0.2,
+                0,
+                sacc_array,
+                2,
+                order_mid=14,
+                order_last=18,
+                trunc_num=25,
+                log_space=log_space,
+            )
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)
+
+    @pytest.mark.parametrize("log_space", [False, True])
+    def test_generalized_d2_precomputed_matches_stagescan_with_split_orders(
+        self, log_space
+    ):
+        mu_array = jnp.array([0.4, -0.2], dtype=jnp.float64)
+        node_array = jnp.array([0.0, 0.6], dtype=jnp.float64)
+        sigma_array = jnp.array([1.0, 0.9], dtype=jnp.float64)
+        b1_array = jnp.array([-0.3, -0.15], dtype=jnp.float64)
+        b2_array = jnp.array([0.2, 0.1], dtype=jnp.float64)
+
+        expected = float(
+            compute_heterog_multistage_logfptd(
+                1.5,
+                1,
+                0.0,
+                1.5,
+                -1.4,
+                mu_array,
+                node_array,
+                sigma_array,
+                b1_array,
+                b2_array,
+                2,
+                order_mid=14,
+                order_last=18,
+                trunc_num=25,
+                log_space=log_space,
+            )
+        )
+        actual = float(
+            compute_heterog_multistage_logfptd_stagescan(
+                1.5,
+                1,
+                0.0,
+                1.5,
+                -1.4,
+                mu_array,
+                node_array,
+                sigma_array,
+                b1_array,
+                b2_array,
+                2,
+                order_mid=14,
+                order_last=18,
+                trunc_num=25,
+                log_space=log_space,
+            )
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-10)
+
 
 class TestJaxScalarGradients:
-    def test_compute_heterog_multistage_fptd_grad_matches_finite_difference(self):
+    def test_compute_heterog_multistage_logfptd_grad_matches_finite_difference(self):
         mu_array = jnp.array([0.35, -0.15, 0.08, 0.0, 0.0], dtype=jnp.float64)
         node_array = jnp.array([0.0, 0.55, 1.25, 0.0, 0.0], dtype=jnp.float64)
         sigma_array = jnp.array([1.0, 0.9, 1.1, 1.0, 1.0], dtype=jnp.float64)
@@ -420,7 +670,7 @@ class TestJaxScalarGradients:
         eps = 1e-5
 
         def f(a1):
-            return compute_heterog_multistage_fptd(
+            return compute_heterog_multistage_logfptd(
                 1.75,
                 1,
                 x0,
@@ -444,7 +694,7 @@ class TestJaxScalarGradients:
             autodiff_grad, finite_diff_grad, rtol=5e-4, atol=1e-7
         )
 
-    def test_compute_heterog_multistage_fptd_jit_matches_nonjit(self):
+    def test_compute_heterog_multistage_logfptd_jit_matches_nonjit(self):
         mu_array = jnp.array([0.4, -0.2, 0.1, 0.0, 0.0], dtype=jnp.float64)
         node_array = jnp.array([0.0, 0.6, 1.3, 0.0, 0.0], dtype=jnp.float64)
         sigma_array = jnp.ones(5, dtype=jnp.float64)
@@ -452,7 +702,7 @@ class TestJaxScalarGradients:
         b2_array = jnp.full(5, 0.3, dtype=jnp.float64)
 
         expected = float(
-            compute_heterog_multistage_fptd(
+            compute_heterog_multistage_logfptd(
                 1.9,
                 1,
                 0.0,
@@ -470,7 +720,7 @@ class TestJaxScalarGradients:
             )
         )
         actual = float(
-            compute_heterog_multistage_fptd_jit(
+            compute_heterog_multistage_logfptd_jit(
                 1.9,
                 1,
                 0.0,

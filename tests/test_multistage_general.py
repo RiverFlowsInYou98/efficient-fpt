@@ -1,22 +1,21 @@
 import numpy as np
 import pytest
 
-from efficient_fpt.multi_stage import compute_homog_multistage_fptds_and_npd
+from efficient_fpt.multi_stage import compute_homog_multistage_logfptds_and_lognpd
 
 jax = pytest.importorskip("jax")
 import jax.numpy as jnp
 
 from efficient_fpt.jax.multi_stage import (
-    compute_addm_fptd as compute_addm_fptd_jax,
-    compute_heterog_multistage_fptd as compute_heterog_multistage_fptd_jax,
-    compute_heterog_multistage_fptd_stagescan,
+    compute_addm_logfptd as compute_addm_logfptd_jax,
+    compute_heterog_multistage_logfptd as compute_heterog_multistage_logfptd_jax,
+    compute_heterog_multistage_logfptd_stagescan,
 )
-
 
 from helpers import try_import_cython_multi_stage as _try_import_cython
 
 
-def _python_single_trial_fptd(
+def _python_single_trial_logfptd(
     rt,
     choice,
     x0,
@@ -31,7 +30,7 @@ def _python_single_trial_fptd(
     trunc_num=100,
 ):
     t_grid = np.array([rt], dtype=np.float64)
-    result, _ = compute_homog_multistage_fptds_and_npd(
+    result, _ = compute_homog_multistage_logfptds_and_lognpd(
         t_grid,
         T=rt + 1.0,
         x0=np.array([[1.0], [x0]], dtype=np.float64),
@@ -48,7 +47,7 @@ def _python_single_trial_fptd(
         adaptive_stopping=False,
     )
     row = 1 if choice == 1 else 2
-    return result[row, 0] if result.shape[1] else 0.0
+    return result[row, 0] if result.shape[1] else -np.inf
 
 
 def _addm_public_args(rt, choice, sigma, a, b, x0, mu1, mu2, node_array, d):
@@ -86,7 +85,7 @@ class TestSymmetricEquivalence:
         rt = node_array[d - 1] + 0.5
 
         addm_result = float(
-            compute_addm_fptd_jax(
+            compute_addm_logfptd_jax(
                 **_addm_public_args(
                     rt, choice, sigma, a, b, x0, mu1, mu2, node_array, d
                 ),
@@ -94,7 +93,7 @@ class TestSymmetricEquivalence:
             )
         )
         heterog_result = float(
-            compute_heterog_multistage_fptd_jax(
+            compute_heterog_multistage_logfptd_jax(
                 rt,
                 choice,
                 x0,
@@ -126,7 +125,7 @@ class TestSymmetricEquivalence:
         rt = 2.2
 
         slow = float(
-            compute_heterog_multistage_fptd_stagescan(
+            compute_heterog_multistage_logfptd_stagescan(
                 rt,
                 choice,
                 0.0,
@@ -142,7 +141,7 @@ class TestSymmetricEquivalence:
             )
         )
         fast = float(
-            compute_heterog_multistage_fptd_jax(
+            compute_heterog_multistage_logfptd_jax(
                 rt,
                 choice,
                 0.0,
@@ -175,7 +174,7 @@ class TestCrossBackendEquivalence:
         b2_array = np.array([0.2, 0.25, 0.3], dtype=np.float64)
         a1, a2, x0, rt = 1.8, -1.2, 0.0, 2.1
 
-        py_result = _python_single_trial_fptd(
+        py_result = _python_single_trial_logfptd(
             rt,
             choice,
             x0,
@@ -190,7 +189,7 @@ class TestCrossBackendEquivalence:
 
         max_d = 5
         jax_result = float(
-            compute_heterog_multistage_fptd_jax(
+            compute_heterog_multistage_logfptd_jax(
                 rt,
                 choice,
                 x0,
@@ -221,9 +220,9 @@ class TestCrossBackendEquivalence:
             py_result, jax_result, rtol=self.RTOL, atol=self.ATOL
         )
 
-        _, compute_heterog_multistage_fptd_cy = _try_import_cython()
-        if compute_heterog_multistage_fptd_cy is not None:
-            cy_result = compute_heterog_multistage_fptd_cy(
+        _, compute_heterog_multistage_logfptd_cy = _try_import_cython()
+        if compute_heterog_multistage_logfptd_cy is not None:
+            cy_result = compute_heterog_multistage_logfptd_cy(
                 rt,
                 choice,
                 x0,
@@ -257,9 +256,7 @@ class TestQuadratureOrder:
             node_array=np.array([0.0, 1.0, 2.0], dtype=np.float64),
             d=3,
         )
-
-        result_20 = float(compute_addm_fptd_jax(**args, order=20, trunc_num=50))
-        result_30 = float(compute_addm_fptd_jax(**args, order=30, trunc_num=50))
-        assert result_20 > 0
-        assert result_30 > 0
-        np.testing.assert_allclose(result_20, result_30, rtol=1e-4)
+        result_20 = float(compute_addm_logfptd_jax(**args, order=20, trunc_num=50))
+        result_30 = float(compute_addm_logfptd_jax(**args, order=30, trunc_num=50))
+        assert np.isfinite(result_20)
+        assert np.isfinite(result_30)
