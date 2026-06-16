@@ -17,6 +17,7 @@ from ..quadrature import (
 # Precision control
 # ---------------------------------------------------------------------------
 
+
 def _current_jax_dtype():
     """Return the active JAX floating-point dtype without mutating config."""
     return jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
@@ -53,6 +54,9 @@ def set_jax_precision(use_x64: bool = True):
     quadrature constants used by this package. Call it explicitly before
     compiling or benchmarking JAX workloads when a specific precision mode is
     required.
+    set_jax_precision(True) enables FP64 for better numerical accuracy, but may
+    be much slower on consumer/workstation GPUs with limited FP64 throughput and
+    is mainly recommended for CPU or datacenter/HPC GPUs.
     """
     global _dtype, _QUAD_CACHE
     jax.config.update("jax_enable_x64", use_x64)
