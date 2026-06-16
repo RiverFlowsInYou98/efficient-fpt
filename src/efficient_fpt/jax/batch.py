@@ -1126,8 +1126,11 @@ def make_addm_nll_function_batchscan(
 # ---------------------------------------------------------------------------
 
 
-compute_addm_loglikelihoods = compute_addm_loglikelihoods_batchscan
-make_addm_nll_function = make_addm_nll_function_batchscan
+# Default batch variant: batchvmap is faster on GPU (parallelizes across trials
+# via jax.vmap).  Use the explicit batchscan variants when GPU memory is tight
+# or with use_remat=True for gradient checkpointing.
+compute_addm_loglikelihoods = compute_addm_loglikelihoods_batchvmap
+make_addm_nll_function = make_addm_nll_function_batchvmap
 compute_addm_loglikelihoods_jit = jit(
     compute_addm_loglikelihoods,
     static_argnames=(
