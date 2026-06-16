@@ -14,7 +14,7 @@ from .multi_stage import (
     compute_addm_logfptd,
     compute_heterog_multistage_logfptd,
 )
-from .utils import print_num_threads
+from .utils import get_num_threads, print_num_threads
 from .batch import (
     compute_addm_loglikelihoods,
     compute_addm_nll,
@@ -52,5 +52,6 @@ __all__ = [
     "simulate_homog_ddm_fpt",
     "simulate_heterog_multistage_fpt",
     # Utilities
+    "get_num_threads",
     "print_num_threads",
 ]
