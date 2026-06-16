@@ -48,8 +48,8 @@ The plain default aliases point to the preferred production methods:
 
 - `compute_addm_logfptd == compute_addm_logfptd_precomputed`
 - `compute_heterog_multistage_logfptd == compute_heterog_multistage_logfptd_precomputed`
-- `compute_addm_loglikelihoods == compute_addm_loglikelihoods_batchscan`
-- `make_addm_nll_function == make_addm_nll_function_batchscan` -->
+- `compute_addm_loglikelihoods == compute_addm_loglikelihoods_batchvmap`
+- `make_addm_nll_function == make_addm_nll_function_batchvmap` -->
 
 ## Installation
 
@@ -149,7 +149,7 @@ import jax
 import jax.numpy as jnp
 from efficient_fpt.jax import (
     set_jax_precision,
-    make_addm_nll_function_batchscan,
+    make_addm_nll_function,
 )
 
 set_jax_precision(True)  # opt into float64 when desired
@@ -168,7 +168,7 @@ sacc_array_data = jnp.array(
 )
 d_data = jnp.array([1, 2, 3], dtype=jnp.int32)
 
-nll_fn = make_addm_nll_function_batchscan(
+nll_fn = make_addm_nll_function(
     rt_data,
     choice_data,
     r1_data,
@@ -179,8 +179,6 @@ nll_fn = make_addm_nll_function_batchscan(
     order_mid=30,
     order_last=30,
     trunc_num=50,
-    log_space=False,
-    use_remat=True,
 )
 
 loss = nll_fn(0.25, 1.1, 1.0, 1.5, 0.3, 0.0)
@@ -189,10 +187,12 @@ grads = jax.grad(nll_fn, argnums=(0, 1, 2, 3, 4, 5))(0.25, 1.1, 1.0, 1.5, 0.3, 0
 
 Notes:
 
+- `make_addm_nll_function` defaults to the **batchvmap** variant, which
+  parallelizes across trials via `jax.vmap` and is fastest on GPU.  Use
+  `make_addm_nll_function_batchscan` when GPU memory is tight or with
+  `use_remat=True` for gradient checkpointing.
 - Importing `efficient_fpt.jax` does not mutate global JAX precision settings.
-- Use `set_jax_precision(True)` when you explicitly want float64.
-- For gradient-heavy batch workloads, `use_remat=True` can significantly reduce
-  reverse-mode memory use.
+  Use `set_jax_precision(True)` when you explicitly want float64.
 - `log_space` selects the internal compute mode; the public multistage and batch
   APIs still return log-values in either mode.
 
@@ -241,17 +241,17 @@ from efficient_fpt.jax import (
 
 <!-- ## Examples
 
-Example notebooks live in [examples](/users/sliu167/WorkSpace/efficient-fpt-review/examples). A few useful entry points:
+Example notebooks live in [examples](examples/). A few useful entry points:
 
-- [examples/example0/example0_single-stage.ipynb](/users/sliu167/WorkSpace/efficient-fpt-review/examples/example0/example0_single-stage.ipynb)
+- [examples/example0/example0_single-stage.ipynb](examples/example0/example0_single-stage.ipynb)
   - single-stage densities and simulation
-- [examples/example1/example1_multi-stage.ipynb](/users/sliu167/WorkSpace/efficient-fpt-review/examples/example1/example1_multi-stage.ipynb)
+- [examples/example1/example1_multi-stage.ipynb](examples/example1/example1_multi-stage.ipynb)
   - multistage densities
-- [examples/tutorial_numpy_vs_jax.ipynb](/users/sliu167/WorkSpace/efficient-fpt-review/examples/tutorial_numpy_vs_jax.ipynb)
+- [examples/tutorial_numpy_vs_jax.ipynb](examples/tutorial_numpy_vs_jax.ipynb)
   - NumPy vs JAX walkthrough
-- [examples/inference_comparison.ipynb](/users/sliu167/WorkSpace/efficient-fpt-review/examples/inference_comparison.ipynb)
+- [examples/inference_comparison.ipynb](examples/inference_comparison.ipynb)
   - inference-oriented comparison
-- [examples/pymc_sampler_comparison.ipynb](/users/sliu167/WorkSpace/efficient-fpt-review/examples/pymc_sampler_comparison.ipynb)
+- [examples/example_jax/pymc_sampler_comparison.ipynb](examples/example_jax/pymc_sampler_comparison.ipynb)
   - PyMC-oriented workflow
 
 Install the `examples` extra if you want to run the notebooks:
@@ -262,7 +262,7 @@ python -m pip install -e ".[examples]"
 
 ## Benchmarks
 
-Benchmark scripts live in [benchmarks](/users/sliu167/WorkSpace/efficient-fpt-review/benchmarks). The most useful entry points are:
+Benchmark scripts live in [benchmarks](benchmarks/). The most useful entry points are:
 
 - `python benchmarks/single_trial_backends.py`
 - `python benchmarks/single_trial_jax_methods.py`
@@ -275,7 +275,7 @@ Smoke / maintenance mode:
 python benchmarks/batch_gpu_methods.py --smoke
 ```
 
-See [benchmarks/README.md](/users/sliu167/WorkSpace/efficient-fpt-review/benchmarks/README.md) for the full script breakdown and JSON output schema.
+See [benchmarks/README.md](benchmarks/README.md) for the full script breakdown and JSON output schema.
 
 ## Testing
 
