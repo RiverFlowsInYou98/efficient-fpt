@@ -18,6 +18,11 @@ cpdef double positive_log_wrapper(double value):
     return positive_log(value)
 
 
+cpdef int get_num_threads():
+    """Return the number of available OpenMP threads."""
+    return omp_get_max_threads()
+
+
 cpdef print_num_threads():
     """Print the number of available OpenMP threads."""
     print("Number of available threads:", omp_get_max_threads())
