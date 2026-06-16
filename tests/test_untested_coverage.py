@@ -5,8 +5,6 @@ Covers:
 - utils.py: adaptive_interpolation
 - models.py: MultiStageModel construction and methods
 - models.py: aDDModel.mean_neg_log_likelihood
-- jax/single_stage.py: log_fptd_basic, log_q_basic, log_fptd_single, log_q_single
-- jax/utils.py: lgwt_lookup_table
 - cython/batch.pyx: compute_tada_mean_nll
 """
 
@@ -201,22 +199,13 @@ class TestMultiStageModel:
 
 
 class TestADDModelMeanNLL:
-    @pytest.fixture
-    def addm_data(self):
-        from efficient_fpt.models import aDDModel
-
-        model = aDDModel(eta=0.5, kappa=1.0, sigma=1.0, a=1.0, b=0.5, x0=0.0)
-        data = model.generate_experiment(n_trials=50, rng=42)
-        return model, data
-
-    def test_returns_finite_scalar(self, addm_data):
-        model, data = addm_data
-        cov = data["covariates"]
-        nll = model.mean_neg_log_likelihood(
-            rt_data=data["decision_data"]["rt_data"],
-            choice_data=data["decision_data"]["choice_data"],
-            r1_data=np.asarray(cov["r1_data"], dtype=np.float64),
-            r2_data=np.asarray(cov["r2_data"], dtype=np.float64),
+    def test_returns_finite_scalar(self, addm_model, addm_experiment):
+        cov = addm_experiment["covariates"]
+        nll = addm_model.mean_neg_log_likelihood(
+            rt_data=addm_experiment["decision_data"]["rt_data"],
+            choice_data=addm_experiment["decision_data"]["choice_data"],
+            r1_data=cov["r1_data"],
+            r2_data=cov["r2_data"],
             flag_data=cov["flag_data"],
             sacc_array_data=cov["sacc_array_data"],
             d_data=cov["d_data"],
@@ -224,19 +213,18 @@ class TestADDModelMeanNLL:
         assert np.isfinite(nll)
         assert isinstance(nll, float)
 
-    def test_different_params_change_nll(self, addm_data):
-        model, data = addm_data
-        cov = data["covariates"]
+    def test_different_params_change_nll(self, addm_model, addm_experiment):
+        cov = addm_experiment["covariates"]
         kwargs = dict(
-            rt_data=data["decision_data"]["rt_data"],
-            choice_data=data["decision_data"]["choice_data"],
-            r1_data=np.asarray(cov["r1_data"], dtype=np.float64),
-            r2_data=np.asarray(cov["r2_data"], dtype=np.float64),
+            rt_data=addm_experiment["decision_data"]["rt_data"],
+            choice_data=addm_experiment["decision_data"]["choice_data"],
+            r1_data=cov["r1_data"],
+            r2_data=cov["r2_data"],
             flag_data=cov["flag_data"],
             sacc_array_data=cov["sacc_array_data"],
             d_data=cov["d_data"],
         )
-        nll1 = model.mean_neg_log_likelihood(**kwargs)
+        nll1 = addm_model.mean_neg_log_likelihood(**kwargs)
         # Change eta and verify NLL changes
         from efficient_fpt.models import aDDModel
         model2 = aDDModel(eta=0.9, kappa=1.0, sigma=1.0, a=1.0, b=0.5, x0=0.0)
@@ -245,153 +233,29 @@ class TestADDModelMeanNLL:
 
 
 # ---------------------------------------------------------------------------
-# JAX: log_fptd_basic, log_q_basic, log_fptd_single, log_q_single
-# ---------------------------------------------------------------------------
-
-jax = pytest.importorskip("jax")
-jnp = pytest.importorskip("jax.numpy")
-
-
-class TestJAXLogFunctions:
-    @pytest.fixture(autouse=True)
-    def _import_jax(self):
-        from efficient_fpt.jax.single_stage import (
-            fptd_basic,
-            q_basic,
-            fptd_single,
-            q_single,
-            log_fptd_basic,
-            log_q_basic,
-            log_fptd_single,
-            log_q_single,
-        )
-        self.fptd_basic = fptd_basic
-        self.q_basic = q_basic
-        self.fptd_single = fptd_single
-        self.q_single = q_single
-        self.log_fptd_basic = log_fptd_basic
-        self.log_q_basic = log_q_basic
-        self.log_fptd_single = log_fptd_single
-        self.log_q_single = log_q_single
-
-    def test_log_fptd_basic_matches_log_of_fptd(self):
-        t = 0.5
-        mu, a1, b1, a2, b2 = 1.0, 1.0, -0.5, -1.0, 0.5
-        for bdy in [1, -1]:
-            density = self.fptd_basic(t, mu, a1, b1, a2, b2, bdy)
-            log_density = self.log_fptd_basic(t, mu, a1, b1, a2, b2, bdy)
-            np.testing.assert_allclose(
-                float(log_density), float(jnp.log(density)), rtol=1e-10
-            )
-
-    def test_log_q_basic_matches_log_of_q(self):
-        x = 0.3
-        mu, a1, b1, a2, b2, T = 1.0, 1.0, -0.5, -1.0, 0.5, 0.5
-        density = self.q_basic(x, mu, a1, b1, a2, b2, T)
-        log_density = self.log_q_basic(x, mu, a1, b1, a2, b2, T)
-        np.testing.assert_allclose(
-            float(log_density), float(jnp.log(density)), rtol=1e-10
-        )
-
-    def test_log_fptd_single_matches_log_of_fptd(self):
-        t = 0.5
-        mu, sigma, a1, b1, a2, b2, x0 = 1.0, 1.5, 1.0, -0.5, -1.0, 0.5, 0.1
-        for bdy in [1, -1]:
-            density = self.fptd_single(t, mu, sigma, a1, b1, a2, b2, x0, bdy)
-            log_density = self.log_fptd_single(t, mu, sigma, a1, b1, a2, b2, x0, bdy)
-            np.testing.assert_allclose(
-                float(log_density), float(jnp.log(density)), rtol=1e-10
-            )
-
-    def test_log_q_single_matches_log_of_q(self):
-        x = 0.3
-        mu, sigma, a1, b1, a2, b2, T, x0 = 1.0, 1.5, 1.0, -0.5, -1.0, 0.5, 0.5, 0.1
-        density = self.q_single(x, mu, sigma, a1, b1, a2, b2, T, x0)
-        log_density = self.log_q_single(x, mu, sigma, a1, b1, a2, b2, T, x0)
-        np.testing.assert_allclose(
-            float(log_density), float(jnp.log(density)), rtol=1e-10
-        )
-
-    def test_log_fptd_basic_array(self):
-        t = jnp.array([0.3, 0.5, 0.8])
-        mu, a1, b1, a2, b2 = 1.0, 1.0, -0.5, -1.0, 0.5
-        log_density = self.log_fptd_basic(t, mu, a1, b1, a2, b2, 1)
-        assert log_density.shape == (3,)
-        assert jnp.all(jnp.isfinite(log_density))
-
-    def test_log_returns_neg_inf_for_zero_density(self):
-        # At t=0, density should be 0, log should be -inf
-        log_d = self.log_fptd_basic(0.0, 1.0, 1.0, -0.5, -1.0, 0.5, 1)
-        assert float(log_d) == float("-inf")
-
-
-# ---------------------------------------------------------------------------
-# JAX: lgwt_lookup_table
-# ---------------------------------------------------------------------------
-
-
-class TestLgwtLookupTable:
-    def test_correct_length(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
-
-        x, w = lgwt_lookup_table(10, 0.0, 1.0)
-        assert x.shape == (10,)
-        assert w.shape == (10,)
-
-    def test_nodes_in_interval(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
-
-        x, w = lgwt_lookup_table(20, -2.0, 3.0)
-        assert float(jnp.min(x)) >= -2.0
-        assert float(jnp.max(x)) <= 3.0
-
-    def test_weights_sum_to_interval_length(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
-
-        x, w = lgwt_lookup_table(30, 2.0, 5.0)
-        np.testing.assert_allclose(float(jnp.sum(w)), 3.0, rtol=1e-12)
-
-    def test_integrates_polynomial_exactly(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
-
-        # Order-n Gauss-Legendre integrates polynomials up to degree 2n-1 exactly
-        x, w = lgwt_lookup_table(5, 0.0, 1.0)
-        # Integral of x^4 from 0 to 1 = 1/5 (degree 4 < 2*5-1=9)
-        result = float(jnp.sum(w * x**4))
-        np.testing.assert_allclose(result, 0.2, rtol=1e-12)
-
-
-# ---------------------------------------------------------------------------
 # Cython: compute_tada_mean_nll
 # ---------------------------------------------------------------------------
 
 
 class TestTADAMeanNLL:
-    @pytest.fixture
-    def tada_data(self):
-        from efficient_fpt.models import aDDModel
-
-        model = aDDModel(eta=0.5, kappa=1.0, sigma=1.0, a=1.0, b=0.5, x0=0.0)
-        return model.generate_experiment(n_trials=30, rng=123)
-
-    def test_returns_finite_scalar(self, tada_data):
+    def test_returns_finite_scalar(self, addm_experiment):
         try:
             from efficient_fpt.cython.batch import compute_tada_mean_nll
         except ImportError:
             pytest.skip("Cython extension not available")
 
-        cov = tada_data["covariates"]
+        cov = addm_experiment["covariates"]
         nll = compute_tada_mean_nll(
-            rt_data=tada_data["decision_data"]["rt_data"],
-            choice_data=tada_data["decision_data"]["choice_data"],
+            rt_data=addm_experiment["decision_data"]["rt_data"],
+            choice_data=addm_experiment["decision_data"]["choice_data"],
             eta=0.5,
             kappa=1.0,
             sigma=1.0,
             a=1.0,
             b=0.5,
             x0=0.0,
-            r1_data=np.asarray(cov["r1_data"], dtype=np.float64),
-            r2_data=np.asarray(cov["r2_data"], dtype=np.float64),
+            r1_data=cov["r1_data"],
+            r2_data=cov["r2_data"],
             flag_data=cov["flag_data"],
             sacc_array_data=cov["sacc_array_data"],
             d_data=cov["d_data"],
@@ -399,19 +263,19 @@ class TestTADAMeanNLL:
         assert np.isfinite(nll)
         assert isinstance(nll, float)
 
-    def test_different_params_change_nll(self, tada_data):
+    def test_different_params_change_nll(self, addm_experiment):
         try:
             from efficient_fpt.cython.batch import compute_tada_mean_nll
         except ImportError:
             pytest.skip("Cython extension not available")
 
-        cov = tada_data["covariates"]
+        cov = addm_experiment["covariates"]
         common = dict(
-            rt_data=tada_data["decision_data"]["rt_data"],
-            choice_data=tada_data["decision_data"]["choice_data"],
+            rt_data=addm_experiment["decision_data"]["rt_data"],
+            choice_data=addm_experiment["decision_data"]["choice_data"],
             kappa=1.0, sigma=1.0, a=1.0, b=0.5, x0=0.0,
-            r1_data=np.asarray(cov["r1_data"], dtype=np.float64),
-            r2_data=np.asarray(cov["r2_data"], dtype=np.float64),
+            r1_data=cov["r1_data"],
+            r2_data=cov["r2_data"],
             flag_data=cov["flag_data"],
             sacc_array_data=cov["sacc_array_data"],
             d_data=cov["d_data"],

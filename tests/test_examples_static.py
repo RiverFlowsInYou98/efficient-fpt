@@ -153,10 +153,11 @@ TRUE_PARAMS = {
 }
 FIXATION_SHAPE = 6
 FIXATION_SCALE = 0.1
-JAX_BATCH_METHOD = "batchscan"
+RUN_CYTHON = False
+RUN_JAX_NOGRAD = True
+RUN_JAX_GRAD = True
 JAX_USE_REMAT = False
-TRUNC_NUM_JAX = 5
+TRUNC_NUM = 5
 """
-    ns = _exec_notebook_cells(MLE_NOTEBOOK, [2, 4, 5, 6, 11, 12, 13, 14, 15], prelude=prelude)
+    ns = _exec_notebook_cells(MLE_NOTEBOOK, [2, 4, 5, 6, 12, 13, 14, 15, 16], prelude=prelude)
     assert ns["num_data"] == 20
-    assert ns["trial_loglikelihoods"].shape[0] == 20

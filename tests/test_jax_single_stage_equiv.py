@@ -265,5 +265,116 @@ class TestSingleStageWrapperEquivalence:
                                    rtol=self.RTOL, atol=self.ATOL)
 
 
+# ---------------------------------------------------------------------------
+# JAX log functions (migrated from test_untested_coverage.py)
+# ---------------------------------------------------------------------------
+
+from efficient_fpt.jax.single_stage import (
+    log_fptd_basic,
+    log_q_basic,
+    log_fptd_single,
+    log_q_single,
+)
+
+
+class TestJAXLogFunctions:
+    @pytest.fixture(autouse=True)
+    def _import_jax(self):
+        self.fptd_basic = fptd_basic_jax
+        self.q_basic = q_basic_jax
+        self.fptd_single = fptd_single_jax
+        self.q_single = q_single_jax
+        self.log_fptd_basic = log_fptd_basic
+        self.log_q_basic = log_q_basic
+        self.log_fptd_single = log_fptd_single
+        self.log_q_single = log_q_single
+
+    def test_log_fptd_basic_matches_log_of_fptd(self):
+        t = 0.5
+        mu, a1, b1, a2, b2 = 1.0, 1.0, -0.5, -1.0, 0.5
+        for bdy in [1, -1]:
+            density = self.fptd_basic(t, mu, a1, b1, a2, b2, bdy)
+            log_density = self.log_fptd_basic(t, mu, a1, b1, a2, b2, bdy)
+            np.testing.assert_allclose(
+                float(log_density), float(jnp.log(density)), rtol=1e-10
+            )
+
+    def test_log_q_basic_matches_log_of_q(self):
+        x = 0.3
+        mu, a1, b1, a2, b2, T = 1.0, 1.0, -0.5, -1.0, 0.5, 0.5
+        density = self.q_basic(x, mu, a1, b1, a2, b2, T)
+        log_density = self.log_q_basic(x, mu, a1, b1, a2, b2, T)
+        np.testing.assert_allclose(
+            float(log_density), float(jnp.log(density)), rtol=1e-10
+        )
+
+    def test_log_fptd_single_matches_log_of_fptd(self):
+        t = 0.5
+        mu, sigma, a1, b1, a2, b2, x0 = 1.0, 1.5, 1.0, -0.5, -1.0, 0.5, 0.1
+        for bdy in [1, -1]:
+            density = self.fptd_single(t, mu, sigma, a1, b1, a2, b2, x0, bdy)
+            log_density = self.log_fptd_single(t, mu, sigma, a1, b1, a2, b2, x0, bdy)
+            np.testing.assert_allclose(
+                float(log_density), float(jnp.log(density)), rtol=1e-10
+            )
+
+    def test_log_q_single_matches_log_of_q(self):
+        x = 0.3
+        mu, sigma, a1, b1, a2, b2, T, x0 = 1.0, 1.5, 1.0, -0.5, -1.0, 0.5, 0.5, 0.1
+        density = self.q_single(x, mu, sigma, a1, b1, a2, b2, T, x0)
+        log_density = self.log_q_single(x, mu, sigma, a1, b1, a2, b2, T, x0)
+        np.testing.assert_allclose(
+            float(log_density), float(jnp.log(density)), rtol=1e-10
+        )
+
+    def test_log_fptd_basic_array(self):
+        t = jnp.array([0.3, 0.5, 0.8])
+        mu, a1, b1, a2, b2 = 1.0, 1.0, -0.5, -1.0, 0.5
+        log_density = self.log_fptd_basic(t, mu, a1, b1, a2, b2, 1)
+        assert log_density.shape == (3,)
+        assert jnp.all(jnp.isfinite(log_density))
+
+    def test_log_returns_neg_inf_for_zero_density(self):
+        # At t=0, density should be 0, log should be -inf
+        log_d = self.log_fptd_basic(0.0, 1.0, 1.0, -0.5, -1.0, 0.5, 1)
+        assert float(log_d) == float("-inf")
+
+
+# ---------------------------------------------------------------------------
+# JAX lgwt_lookup_table (migrated from test_untested_coverage.py)
+# ---------------------------------------------------------------------------
+
+
+class TestLgwtLookupTable:
+    def test_correct_length(self):
+        from efficient_fpt.jax.utils import lgwt_lookup_table
+
+        x, w = lgwt_lookup_table(10, 0.0, 1.0)
+        assert x.shape == (10,)
+        assert w.shape == (10,)
+
+    def test_nodes_in_interval(self):
+        from efficient_fpt.jax.utils import lgwt_lookup_table
+
+        x, w = lgwt_lookup_table(20, -2.0, 3.0)
+        assert float(jnp.min(x)) >= -2.0
+        assert float(jnp.max(x)) <= 3.0
+
+    def test_weights_sum_to_interval_length(self):
+        from efficient_fpt.jax.utils import lgwt_lookup_table
+
+        x, w = lgwt_lookup_table(30, 2.0, 5.0)
+        np.testing.assert_allclose(float(jnp.sum(w)), 3.0, rtol=1e-12)
+
+    def test_integrates_polynomial_exactly(self):
+        from efficient_fpt.jax.utils import lgwt_lookup_table
+
+        # Order-n Gauss-Legendre integrates polynomials up to degree 2n-1 exactly
+        x, w = lgwt_lookup_table(5, 0.0, 1.0)
+        # Integral of x^4 from 0 to 1 = 1/5 (degree 4 < 2*5-1=9)
+        result = float(jnp.sum(w * x**4))
+        np.testing.assert_allclose(result, 0.2, rtol=1e-12)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

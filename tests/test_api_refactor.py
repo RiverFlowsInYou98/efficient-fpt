@@ -93,8 +93,8 @@ def test_public_aliases_follow_log_first_contract():
         compute_heterog_multistage_logfptd
         is compute_heterog_multistage_logfptd_precomputed
     )
-    assert compute_addm_loglikelihoods is compute_addm_loglikelihoods_batchscan
-    assert make_addm_nll_function is make_addm_nll_function_batchscan
+    assert compute_addm_loglikelihoods is compute_addm_loglikelihoods_batchvmap
+    assert make_addm_nll_function is make_addm_nll_function_batchvmap
 
 
 def test_cython_public_namespace_does_not_export_private_simulator_helper():

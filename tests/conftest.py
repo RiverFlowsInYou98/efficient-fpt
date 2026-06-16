@@ -27,3 +27,20 @@ def configure_jax_precision_for_tests():
     set_jax_precision(True)
     yield
     set_jax_precision(previous)
+
+
+@pytest.fixture
+def addm_model():
+    """Standard aDDModel for testing."""
+    from efficient_fpt.models import aDDModel
+    return aDDModel(eta=0.5, kappa=1.0, sigma=1.0, a=1.0, b=0.5, x0=0.0)
+
+
+@pytest.fixture
+def addm_experiment(addm_model):
+    """Generate a small aDDM experiment for testing."""
+    data = addm_model.generate_experiment(n_trials=50, rng=42)
+    # Cast r1/r2 to float64 for Cython compatibility
+    data["covariates"]["r1_data"] = data["covariates"]["r1_data"].astype("float64")
+    data["covariates"]["r2_data"] = data["covariates"]["r2_data"].astype("float64")
+    return data

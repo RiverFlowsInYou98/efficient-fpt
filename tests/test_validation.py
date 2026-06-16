@@ -212,3 +212,15 @@ class TestMultiStageValidation:
                 a2=1.0,
                 b2_array=np.array([0.3, 0.3]),
             )
+
+    def test_accepts_single_stage_schedule(self):
+        """check_multistage_params should accept a single-stage schedule."""
+        check_multistage_params(
+            np.array([0.2]),
+            np.array([0.0]),
+            np.array([1.0]),
+            1.0,
+            np.array([-0.2]),
+            -1.0,
+            np.array([0.2]),
+        )
