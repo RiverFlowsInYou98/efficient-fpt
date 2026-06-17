@@ -1,15 +1,16 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "🧼 Cleaning previous builds..."
 rm -rf build/ dist/
-find src/efficient_fpt -name "*.c" -delete
-find src/efficient_fpt -name "*.so" -delete
-find src/efficient_fpt -name "*.pyd" -delete  # For Windows support
+find src/efpt -name "*.c" -delete
+find src/efpt -name "*.so" -delete
+find src/efpt -name "*.pyd" -delete
 
 echo "🔧 Building Cython extensions..."
 python setup.py build_ext --inplace
 
 echo "📦 Installing in editable mode..."
-pip install -e .
+python -m pip install -e .
 
 echo "✅ Done."

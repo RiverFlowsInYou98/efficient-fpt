@@ -182,3 +182,8 @@ examples/example4_new/timing
 examples/example5_error/error_analyses_scratch.ipynb
 
 misc/
+
+src/efpt/**/*.c
+src/efpt/**/*.so
+src/efpt/**/*.pyd
+src/efpt/cython/_defaults.pxi

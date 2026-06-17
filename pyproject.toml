@@ -3,27 +3,57 @@ requires = ["setuptools>=61.0", "wheel", "cython", "numpy"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "efficient-fpt"
-version = "0.1.0"
+name = "efpt"
+version = "0.2.0"
 description = "Codes for efficient inference in first passage time models"
 authors = [
     { name = "Sicheng Liu", email = "sicheng_liu@brown.edu" }
 ]
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 dependencies = [
     "numpy",
+]
+
+[project.optional-dependencies]
+examples = ["scipy", "matplotlib", "jupyter"]
+jax = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+]
+pymc = [
+    "pymc>=5.0",
+    "arviz>=0.15.0",
+]
+test = [
+    "pytest>=7.0",
+    "pytest-xdist",
+    "numpy",
+]
+all = [
+    "scipy", "matplotlib", "jupyter",
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "pymc>=5.0",
+    "arviz>=0.15.0",
+    "pytest>=7.0",
+    "pytest-xdist",
 ]
 
 [project.urls]
 Homepage = "https://github.com/RiverFlowsInYou98/efficient-fpt"
 Repository = "https://github.com/RiverFlowsInYou98/efficient-fpt"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m \"not benchmark_smoke\""
+markers = [
+    "benchmark_smoke: benchmark subprocess smoke checks that are excluded from default pytest runs",
+]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-
