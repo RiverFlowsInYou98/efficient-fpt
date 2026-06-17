@@ -43,6 +43,7 @@ from .utils import (
     GAUSS_LEGENDRE_30_W,
     set_jax_precision,
     get_jax_dtype,
+    get_jax_device_name,
 )
 
 __all__ = [
@@ -78,4 +79,5 @@ __all__ = [
     # Precision control
     "set_jax_precision",
     "get_jax_dtype",
+    "get_jax_device_name",
 ]

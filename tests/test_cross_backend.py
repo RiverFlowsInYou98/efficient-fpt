@@ -7,8 +7,8 @@ identical results for the same inputs.
 import numpy as np
 import pytest
 
-from efficient_fpt.single_stage import fptd_single, log_fptd_single, q_single
-from efficient_fpt.multi_stage import compute_homog_multistage_logfptds_and_lognpd
+from efpt.single_stage import fptd_single, log_fptd_single, q_single
+from efpt.multi_stage import compute_homog_multistage_logfptds_and_lognpd
 
 
 # ---------------------------------------------------------------------------
@@ -19,15 +19,15 @@ from efficient_fpt.multi_stage import compute_homog_multistage_logfptds_and_logn
 def _load_single_stage_funcs(backend_name):
     """Return (fptd_basic, q_basic, fptd_single, q_single) for a backend."""
     if backend_name == "numpy":
-        from efficient_fpt.numpy.single_stage import (
+        from efpt.numpy.single_stage import (
             fptd_basic, q_basic, fptd_single, q_single,
         )
     elif backend_name == "cython":
-        pytest.importorskip("efficient_fpt.cython")
-        from efficient_fpt.cython import fptd_basic, q_basic, fptd_single, q_single
+        pytest.importorskip("efpt.cython")
+        from efpt.cython import fptd_basic, q_basic, fptd_single, q_single
     elif backend_name == "jax":
         pytest.importorskip("jax")
-        from efficient_fpt.jax import fptd_basic, q_basic, fptd_single, q_single
+        from efpt.jax import fptd_basic, q_basic, fptd_single, q_single
     return dict(
         fptd_basic=fptd_basic,
         q_basic=q_basic,
@@ -212,10 +212,10 @@ class TestBatchNLLCrossBackend:
         """Both backends should produce similar mean NLL for the same data."""
         pytest.importorskip("jax")
         try:
-            from efficient_fpt.cython.batch import compute_addm_nll as cy_nll
+            from efpt.cython.batch import compute_addm_nll as cy_nll
         except ImportError:
             pytest.skip("Cython backend not available")
-        from efficient_fpt.jax.batch import compute_addm_nll as jax_nll
+        from efpt.jax.batch import compute_addm_nll as jax_nll
         import jax.numpy as jnp
 
         rng = np.random.default_rng(42)
@@ -254,10 +254,10 @@ class TestBatchNLLCrossBackend:
         """Sum reduction should also agree."""
         pytest.importorskip("jax")
         try:
-            from efficient_fpt.cython.batch import compute_addm_nll as cy_nll
+            from efpt.cython.batch import compute_addm_nll as cy_nll
         except ImportError:
             pytest.skip("Cython backend not available")
-        from efficient_fpt.jax.batch import compute_addm_nll as jax_nll
+        from efpt.jax.batch import compute_addm_nll as jax_nll
         import jax.numpy as jnp
 
         rng = np.random.default_rng(42)
@@ -300,12 +300,12 @@ class TestSingleStageCythonAgreement:
     """Detailed NumPy-vs-Cython single-stage agreement tests."""
 
     def test_single_stage_fptd(self):
-        pytest.importorskip("efficient_fpt.cython.single_stage")
-        from efficient_fpt.cython.single_stage import (
+        pytest.importorskip("efpt.cython.single_stage")
+        from efpt.cython.single_stage import (
             fptd_single as fptd_single_cy,
             log_fptd_single as log_fptd_single_cy,
         )
-        from efficient_fpt.cython.multi_stage import compute_addm_logfptd
+        from efpt.cython.multi_stage import compute_addm_logfptd
 
         mu = 1.0
         sigma = 1.0
@@ -358,8 +358,8 @@ class TestSingleStageCythonAgreement:
         )
 
     def test_cython_single_stage_supports_fixed_truncation(self):
-        pytest.importorskip("efficient_fpt.cython.single_stage")
-        from efficient_fpt.cython.single_stage import (
+        pytest.importorskip("efpt.cython.single_stage")
+        from efpt.cython.single_stage import (
             fptd_single as fptd_single_cy,
             q_single as q_single_cy,
         )

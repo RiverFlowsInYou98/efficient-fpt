@@ -10,7 +10,7 @@ def try_import_cython_multi_stage():
     or (None, None).
     """
     try:
-        from efficient_fpt.cython.multi_stage import (
+        from efpt.cython.multi_stage import (
             compute_addm_logfptd,
             compute_heterog_multistage_logfptd,
         )

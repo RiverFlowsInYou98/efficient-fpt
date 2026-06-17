@@ -1,12 +1,12 @@
 import numpy as np
 import pytest
 
-from efficient_fpt.multi_stage import compute_homog_multistage_logfptds_and_lognpd
+from efpt.multi_stage import compute_homog_multistage_logfptds_and_lognpd
 
 jax = pytest.importorskip("jax")
 import jax.numpy as jnp
 
-from efficient_fpt.jax.multi_stage import (
+from efpt.jax.multi_stage import (
     compute_addm_logfptd as compute_addm_logfptd_jax,
     compute_heterog_multistage_logfptd as compute_heterog_multistage_logfptd_jax,
     compute_heterog_multistage_logfptd_stagescan,

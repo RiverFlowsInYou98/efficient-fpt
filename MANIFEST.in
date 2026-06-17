@@ -5,9 +5,9 @@ include pyproject.toml
 include setup.py
 
 # Include all Python files in the source tree
-recursive-include src/efficient_fpt *.py
+recursive-include src/efpt *.py
 
 # Include all Cython files
-recursive-include src/efficient_fpt *.pyx
-recursive-include src/efficient_fpt *.pxd
+recursive-include src/efpt *.pyx
+recursive-include src/efpt *.pxd
 

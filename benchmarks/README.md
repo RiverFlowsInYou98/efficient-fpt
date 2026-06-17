@@ -1,6 +1,6 @@
 # Benchmarks
 
-This folder contains the local benchmark suite for `efficient-fpt`.
+This folder contains the local benchmark suite for `efpt`.
 
 The scripts are organized by performance question rather than by backend:
 

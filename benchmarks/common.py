@@ -22,11 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from efficient_fpt._defaults import (
+from efpt._defaults import (
     DEFAULT_LAST_QUAD_ORDER,
     DEFAULT_MID_QUAD_ORDER,
 )
-from efficient_fpt.utils import resolve_quadrature_orders
+from efpt.utils import resolve_quadrature_orders
 
 
 BENCHMARK_SCHEMA_VERSION = 2
@@ -112,7 +112,7 @@ def import_jax(precision: str = "float64"):
     """Import JAX lazily and configure the requested precision."""
     import jax
 
-    from efficient_fpt.jax.utils import set_jax_precision
+    from efpt.jax.utils import set_jax_precision
 
     set_jax_precision(precision == "float64")
 
@@ -434,7 +434,7 @@ def make_single_trial_test_data_np(d: int):
 
 def make_single_trial_test_data_jax(jnp, d: int, max_d: int | None = None):
     """Build a deterministic single-trial test case for JAX benchmarks."""
-    from efficient_fpt.jax.utils import get_jax_dtype
+    from efpt.jax.utils import get_jax_dtype
 
     sigma, a, b, x0 = 1.0, 1.5, 0.3, 0.0
     if max_d is None:

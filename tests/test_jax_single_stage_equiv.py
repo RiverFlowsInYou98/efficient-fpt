@@ -13,8 +13,8 @@ jax = pytest.importorskip("jax")
 import jax.numpy as jnp
 from jax import vmap
 
-from efficient_fpt.single_stage import fptd_basic, q_basic, fptd_single, q_single
-from efficient_fpt.jax.single_stage import (
+from efpt.single_stage import fptd_basic, q_basic, fptd_single, q_single
+from efpt.jax.single_stage import (
     fptd_basic as fptd_basic_jax,
     q_basic as q_basic_jax,
     fptd_single as fptd_single_jax,
@@ -269,7 +269,7 @@ class TestSingleStageWrapperEquivalence:
 # JAX log functions (migrated from test_untested_coverage.py)
 # ---------------------------------------------------------------------------
 
-from efficient_fpt.jax.single_stage import (
+from efpt.jax.single_stage import (
     log_fptd_basic,
     log_q_basic,
     log_fptd_single,
@@ -347,27 +347,27 @@ class TestJAXLogFunctions:
 
 class TestLgwtLookupTable:
     def test_correct_length(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
+        from efpt.jax.utils import lgwt_lookup_table
 
         x, w = lgwt_lookup_table(10, 0.0, 1.0)
         assert x.shape == (10,)
         assert w.shape == (10,)
 
     def test_nodes_in_interval(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
+        from efpt.jax.utils import lgwt_lookup_table
 
         x, w = lgwt_lookup_table(20, -2.0, 3.0)
         assert float(jnp.min(x)) >= -2.0
         assert float(jnp.max(x)) <= 3.0
 
     def test_weights_sum_to_interval_length(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
+        from efpt.jax.utils import lgwt_lookup_table
 
         x, w = lgwt_lookup_table(30, 2.0, 5.0)
         np.testing.assert_allclose(float(jnp.sum(w)), 3.0, rtol=1e-12)
 
     def test_integrates_polynomial_exactly(self):
-        from efficient_fpt.jax.utils import lgwt_lookup_table
+        from efpt.jax.utils import lgwt_lookup_table
 
         # Order-n Gauss-Legendre integrates polynomials up to degree 2n-1 exactly
         x, w = lgwt_lookup_table(5, 0.0, 1.0)

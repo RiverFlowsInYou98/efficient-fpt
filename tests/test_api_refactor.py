@@ -10,24 +10,24 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import efficient_fpt.multi_stage as top_level_multi_stage
-import efficient_fpt.single_stage as top_level_single_stage
-import efficient_fpt.jax as jax_api
-from efficient_fpt import (
+import efpt.multi_stage as top_level_multi_stage
+import efpt.single_stage as top_level_single_stage
+import efpt.jax as jax_api
+from efpt import (
     aDDModel,
     load_addm_experiment,
     load_simulation,
     save_addm_experiment,
     save_simulation,
 )
-from efficient_fpt.io import (
+from efpt.io import (
     _CONFIG_KEYS,
     _COVARIATE_KEYS,
     _DECISION_KEYS,
     _GROUP_KEYS,
     _PARAM_KEYS,
 )
-from efficient_fpt.jax.batch import (
+from efpt.jax.batch import (
     compute_addm_loglikelihoods,
     compute_addm_loglikelihoods_batchscan,
     compute_addm_loglikelihoods_batchvmap,
@@ -36,7 +36,7 @@ from efficient_fpt.jax.batch import (
     make_addm_nll_function_batchscan,
     make_addm_nll_function_batchvmap,
 )
-from efficient_fpt.jax.multi_stage import (
+from efpt.jax.multi_stage import (
     compute_addm_logfptd,
     compute_addm_logfptd_precomputed,
     compute_addm_logfptd_stagescan,
@@ -44,14 +44,14 @@ from efficient_fpt.jax.multi_stage import (
     compute_heterog_multistage_logfptd_precomputed,
     compute_heterog_multistage_logfptd_stagescan,
 )
-from efficient_fpt.jax.single_stage import (
+from efpt.jax.single_stage import (
     fptd_single as jax_fptd_single,
     log_fptd_single as jax_log_fptd_single,
     log_q_single as jax_log_q_single,
     q_single as jax_q_single,
 )
-from efficient_fpt.multi_stage import compute_homog_multistage_logfptds_and_lognpd
-from efficient_fpt.numpy.single_stage import (
+from efpt.multi_stage import compute_homog_multistage_logfptds_and_lognpd
+from efpt.numpy.single_stage import (
     fptd_single as np_fptd_single,
     log_fptd_single as np_log_fptd_single,
     log_q_single as np_log_q_single,
@@ -59,7 +59,7 @@ from efficient_fpt.numpy.single_stage import (
 )
 
 try:
-    import efficient_fpt.cython as cython_api
+    import efpt.cython as cython_api
 except ImportError:  # pragma: no cover
     cython_api = None
 
@@ -111,11 +111,11 @@ def test_top_level_compatibility_modules_do_not_leak_backend_internals():
     assert not hasattr(top_level_multi_stage, "filter_and_group")
 
 
-def test_importing_efficient_fpt_jax_does_not_change_x64_flag():
+def test_importing_efpt_jax_does_not_change_x64_flag():
     lines = _run_python_snippet(
         "import jax; "
         "before = jax.config.read('jax_enable_x64'); "
-        "import efficient_fpt.jax; "
+        "import efpt.jax; "
         "after = jax.config.read('jax_enable_x64'); "
         "print(before); print(after)"
     )
@@ -125,7 +125,7 @@ def test_importing_efficient_fpt_jax_does_not_change_x64_flag():
 def test_set_jax_precision_explicitly_controls_x64_flag():
     lines = _run_python_snippet(
         "import jax; "
-        "from efficient_fpt.jax.utils import set_jax_precision; "
+        "from efpt.jax.utils import set_jax_precision; "
         "print(jax.config.read('jax_enable_x64')); "
         "set_jax_precision(True); "
         "print(jax.config.read('jax_enable_x64')); "
@@ -498,7 +498,7 @@ def test_save_and_load_addm_experiment_roundtrip_uses_strict_npz_schema(tmp_path
     save_addm_experiment(path, data)
 
     with np.load(path, allow_pickle=False) as archive:
-        assert archive["__format__"].item() == "efficient_fpt.addm_experiment"
+        assert archive["__format__"].item() == "efpt.addm_experiment"
         assert int(archive["__version__"].item()) == 1
         assert set(archive.files) == {
             "__format__",
@@ -639,7 +639,7 @@ def test_load_addm_experiment_rejects_bad_archive_metadata(tmp_path):
 def test_load_addm_experiment_rejects_noncanonical_archive_keys(tmp_path):
     path = tmp_path / "legacy_addm.npz"
     legacy = {
-        "__format__": np.asarray("efficient_fpt.addm_experiment"),
+        "__format__": np.asarray("efpt.addm_experiment"),
         "__version__": np.asarray(1, dtype=np.int64),
         "rt_data": np.array([1.2, 1.7], dtype=np.float64),
     }
@@ -661,7 +661,7 @@ def test_save_and_load_simulation_roundtrip_npz(tmp_path):
     save_simulation(path, payload)
 
     with np.load(path, allow_pickle=False) as archive:
-        assert archive["__format__"].item() == "efficient_fpt.simulation"
+        assert archive["__format__"].item() == "efpt.simulation"
         assert int(archive["__version__"].item()) == 1
         assert set(archive.files) == {
             "__format__",

@@ -8,7 +8,7 @@ def piecewise_const_func(t, mu_array, node_array):
 
     Assumes pre-validated inputs (lengths match, node_array strictly
     increasing with node_array[0] == 0).  Validation is handled by
-    :func:`~efficient_fpt.validation.check_multistage_params` at the
+    :func:`~efpt.validation.check_multistage_params` at the
     model/API level.
     """
     d = len(mu_array)
@@ -25,7 +25,7 @@ def piecewise_linear_func(t, a_array, b_array, node_array):
 
     Assumes pre-validated inputs (lengths match, node_array strictly
     increasing with node_array[0] == 0).  Validation is handled by
-    :func:`~efficient_fpt.validation.check_multistage_params` at the
+    :func:`~efpt.validation.check_multistage_params` at the
     model/API level.
     """
     d = len(b_array)

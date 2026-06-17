@@ -18,7 +18,7 @@ from benchmarks.common import (
     make_metrics,
     write_json_output,
 )
-from efficient_fpt.numpy.multi_stage import _logsumexp as numpy_logsumexp
+from efpt.numpy.multi_stage import _logsumexp as numpy_logsumexp
 
 try:
     from scipy.special import logsumexp as scipy_logsumexp

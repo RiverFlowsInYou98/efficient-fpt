@@ -8,10 +8,10 @@ import sys
 def _generate_defaults_pxi():
     """Read _defaults.py and write cython/_defaults.pxi with DEF constants."""
     defaults_py = os.path.join(
-        os.path.dirname(__file__), "src", "efficient_fpt", "_defaults.py"
+        os.path.dirname(__file__), "src", "efpt", "_defaults.py"
     )
     pxi_path = os.path.join(
-        os.path.dirname(__file__), "src", "efficient_fpt", "cython", "_defaults.pxi"
+        os.path.dirname(__file__), "src", "efpt", "cython", "_defaults.pxi"
     )
     namespace = {}
     with open(defaults_py) as f:
@@ -43,35 +43,35 @@ base_compile_args = ["-O3", "-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION"]
 
 extensions = [
     Extension(
-        "efficient_fpt.cython.single_stage",  # no OpenMP
-        sources=["src/efficient_fpt/cython/single_stage.pyx"],
+        "efpt.cython.single_stage",  # no OpenMP
+        sources=["src/efpt/cython/single_stage.pyx"],
         include_dirs=[numpy.get_include()],
         extra_compile_args=base_compile_args,
     ),
     Extension(
-        "efficient_fpt.cython.multi_stage",  # with OpenMP
-        sources=["src/efficient_fpt/cython/multi_stage.pyx"],
+        "efpt.cython.multi_stage",  # with OpenMP
+        sources=["src/efpt/cython/multi_stage.pyx"],
         include_dirs=[numpy.get_include()],
         extra_compile_args=base_compile_args + omp_compile_args,
         extra_link_args=omp_link_args,
     ),
     Extension(
-        "efficient_fpt.cython.batch",  # with OpenMP
-        sources=["src/efficient_fpt/cython/batch.pyx"],
+        "efpt.cython.batch",  # with OpenMP
+        sources=["src/efpt/cython/batch.pyx"],
         include_dirs=[numpy.get_include()],
         extra_compile_args=base_compile_args + omp_compile_args,
         extra_link_args=omp_link_args,
     ),
     Extension(
-        "efficient_fpt.cython.simulator",  # with OpenMP
-        sources=["src/efficient_fpt/cython/simulator.pyx"],
+        "efpt.cython.simulator",  # with OpenMP
+        sources=["src/efpt/cython/simulator.pyx"],
         include_dirs=[numpy.get_include()],
         extra_compile_args=base_compile_args + omp_compile_args,
         extra_link_args=omp_link_args,
     ),
     Extension(
-        "efficient_fpt.cython.utils",  # with OpenMP (for omp_get_max_threads)
-        sources=["src/efficient_fpt/cython/utils.pyx"],
+        "efpt.cython.utils",  # with OpenMP (for omp_get_max_threads)
+        sources=["src/efpt/cython/utils.pyx"],
         include_dirs=[numpy.get_include()],
         extra_compile_args=base_compile_args + omp_compile_args,
         extra_link_args=omp_link_args,

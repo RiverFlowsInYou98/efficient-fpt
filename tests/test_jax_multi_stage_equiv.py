@@ -7,7 +7,7 @@ jax = pytest.importorskip("jax")
 import jax.numpy as jnp
 from jax import grad, value_and_grad
 
-from efficient_fpt.jax.batch import (
+from efpt.jax.batch import (
     compute_addm_loglikelihoods,
     compute_addm_loglikelihoods_batchscan,
     compute_addm_loglikelihoods_batchvmap,
@@ -16,7 +16,7 @@ from efficient_fpt.jax.batch import (
     make_addm_nll_function_batchscan,
     make_addm_nll_function_batchvmap,
 )
-from efficient_fpt.jax.multi_stage import (
+from efpt.jax.multi_stage import (
     compute_addm_logfptd,
     compute_addm_logfptd_stagescan,
     compute_addm_logfptd_jit,

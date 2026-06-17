@@ -59,7 +59,7 @@ def parse_args():
 
 
 def build_variants(jnp, data, order_mid: int, order_last: int, trunc_num: int):
-    from efficient_fpt.jax.multi_stage import (
+    from efpt.jax.multi_stage import (
         compute_addm_logfptd_precomputed,
         compute_addm_logfptd_stagescan,
         compute_heterog_multistage_logfptd_precomputed,

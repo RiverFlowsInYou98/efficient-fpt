@@ -145,3 +145,30 @@ def lgwt_lookup_table(order: int, a: float, b: float):
     """
     x_np, w_np = _np_lgwt(order, a, b)
     return jnp.array(x_np, dtype=_dtype), jnp.array(w_np, dtype=_dtype)
+
+
+def get_jax_device_name():
+    """Return a human-readable name for the default JAX device.
+
+    For GPU devices, queries ``nvidia-smi`` for the actual model name.
+    Falls back to the JAX device repr if ``nvidia-smi`` is unavailable.
+    """
+    import jax
+
+    dev = jax.devices()[0]
+    if dev.platform == "gpu":
+        try:
+            import subprocess
+
+            name = (
+                subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                    text=True,
+                )
+                .strip()
+                .split("\n")[0]
+            )
+            return f"{name} (GPU)"
+        except Exception:
+            return f"{dev!r} (GPU)"
+    return repr(dev)

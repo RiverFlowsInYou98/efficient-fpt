@@ -8,10 +8,10 @@ excluded from the test suite.
 import numpy as np
 import pytest
 
-pytest.importorskip("efficient_fpt.cython.simulator")
+pytest.importorskip("efpt.cython.simulator")
 
-from efficient_fpt.models import aDDModel, MultiStageModel, SingleStageModel
-from efficient_fpt.cython.simulator import (
+from efpt.models import aDDModel, MultiStageModel, SingleStageModel
+from efpt.cython.simulator import (
     _simulate_addm_fpt,
     simulate_homog_ddm_fpt,
 )

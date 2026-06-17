@@ -73,7 +73,7 @@ def main():
     print("=" * 96)
     for precision in precision_values:
         jax, jnp = import_jax(precision)
-        from efficient_fpt.jax.batch import (
+        from efpt.jax.batch import (
             compute_addm_loglikelihoods_batchscan,
             compute_addm_loglikelihoods_batchvmap,
             make_addm_nll_function_batchscan,

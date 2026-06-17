@@ -18,7 +18,7 @@ def configure_jax_precision_for_tests():
     """
     try:
         import jax
-        from efficient_fpt.jax.utils import set_jax_precision
+        from efpt.jax.utils import set_jax_precision
     except ImportError:
         yield
         return
@@ -32,7 +32,7 @@ def configure_jax_precision_for_tests():
 @pytest.fixture
 def addm_model():
     """Standard aDDModel for testing."""
-    from efficient_fpt.models import aDDModel
+    from efpt.models import aDDModel
     return aDDModel(eta=0.5, kappa=1.0, sigma=1.0, a=1.0, b=0.5, x0=0.0)
 
 

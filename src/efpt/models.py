@@ -810,7 +810,7 @@ class aDDModel:
         -------
         dict
             Grouped canonical aDDM experiment payload with the same schema used
-            by :func:`efficient_fpt.io.save_addm_experiment` when persisted to
+            by :func:`efpt.io.save_addm_experiment` when persisted to
             the canonical `.npz` experiment archive:
 
             - ``decision_data``: ``rt_data``, ``choice_data``

@@ -13,8 +13,8 @@ import numpy as np
 
 
 _ARCHIVE_VERSION = 1
-_SIMULATION_FORMAT = "efficient_fpt.simulation"
-_ADDM_EXPERIMENT_FORMAT = "efficient_fpt.addm_experiment"
+_SIMULATION_FORMAT = "efpt.simulation"
+_ADDM_EXPERIMENT_FORMAT = "efpt.addm_experiment"
 _RESERVED_ARCHIVE_KEYS = {"__format__", "__version__"}
 
 

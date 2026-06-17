@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from efficient_fpt.validation import check_addm_params, check_multistage_params
-from efficient_fpt.models import SingleStageModel, aDDModel, MultiStageModel
+from efpt.validation import check_addm_params, check_multistage_params
+from efpt.models import SingleStageModel, aDDModel, MultiStageModel
 
 
 class TestValidateAddmParams:

@@ -1,6 +1,6 @@
 # efficient-fpt
 
-`efficient-fpt` implements fast numerical methods for first-passage time
+`efpt` implements fast numerical methods for first-passage time
 densities in first passage time models, with a particular focus on
 likelihood-based inference for generalized drift diffusion
 models (GDDMs) in computational cognitive neuroscience.
@@ -21,12 +21,12 @@ notebooks accompanying the paper
 
 The package is organized around complementary backends:
 
-- `efficient_fpt.cython`
+- `efpt.cython`
   - fastest CPU-oriented production path for many likelihood and simulation
     workloads
-- `efficient_fpt.jax`
+- `efpt.jax`
   - JAX-native kernels for GPU execution and gradient-based inference
-- `efficient_fpt.numpy`
+- `efpt.numpy`
   - reference-style NumPy implementations and supporting utilities, convenient log-density computation for homogeneous DDMs
 
 <!-- For JAX there are explicit implementation families:
@@ -90,7 +90,7 @@ For many CPU workflows, the model classes are the easiest entry point.
 
 ```python
 import numpy as np
-from efficient_fpt import aDDModel
+from efpt import aDDModel
 
 model = aDDModel(
     eta=0.25,
@@ -147,7 +147,7 @@ For GPU or autodiff-based inference, use the JAX batch API directly.
 ```python
 import jax
 import jax.numpy as jnp
-from efficient_fpt.jax import (
+from efpt.jax import (
     set_jax_precision,
     make_addm_nll_function,
 )
@@ -191,7 +191,7 @@ Notes:
   parallelizes across trials via `jax.vmap` and is fastest on GPU.  Use
   `make_addm_nll_function_batchscan` when GPU memory is tight or with
   `use_remat=True` for gradient checkpointing.
-- Importing `efficient_fpt.jax` does not mutate global JAX precision settings.
+- Importing `efpt.jax` does not mutate global JAX precision settings.
   Use `set_jax_precision(True)` when you explicitly want float64.
 - `log_space` selects the internal compute mode; the public multistage and batch
   APIs still return log-values in either mode.
@@ -201,7 +201,7 @@ Notes:
 ### Top-level package
 
 ```python
-from efficient_fpt import (
+from efpt import (
     DDModel,
     SingleStageModel,
     MultiStageModel,
@@ -216,7 +216,7 @@ from efficient_fpt import (
 ### JAX package
 
 ```python
-from efficient_fpt.jax import (
+from efpt.jax import (
     fptd_single,
     q_single,
     log_fptd_single,

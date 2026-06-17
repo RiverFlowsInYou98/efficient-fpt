@@ -11,12 +11,12 @@ Covers:
 import numpy as np
 import pytest
 
-from efficient_fpt.boundaries import (
+from efpt.boundaries import (
     piecewise_const_func,
     piecewise_linear_func,
     weibull_survival,
 )
-from efficient_fpt.utils import adaptive_interpolation
+from efpt.utils import adaptive_interpolation
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ class TestAdaptiveInterpolation:
 
 class TestMultiStageModel:
     def test_construction(self):
-        from efficient_fpt.models import MultiStageModel
+        from efpt.models import MultiStageModel
 
         mu = np.array([1.0, 2.0])
         nodes = np.array([0.0, 0.5])
@@ -137,7 +137,7 @@ class TestMultiStageModel:
         np.testing.assert_array_equal(model.mu_array, mu)
 
     def test_drift_and_diffusion(self):
-        from efficient_fpt.models import MultiStageModel
+        from efpt.models import MultiStageModel
 
         mu = np.array([1.0, 3.0])
         nodes = np.array([0.0, 1.0])
@@ -152,7 +152,7 @@ class TestMultiStageModel:
         assert model.diffusion_coeff(0, 1.5) == 1.5
 
     def test_boundaries(self):
-        from efficient_fpt.models import MultiStageModel
+        from efpt.models import MultiStageModel
 
         mu = np.array([1.0])
         nodes = np.array([0.0])
@@ -167,7 +167,7 @@ class TestMultiStageModel:
         np.testing.assert_allclose(model.lower_bdy(1.0), -0.5)
 
     def test_is_update_vectorizable(self):
-        from efficient_fpt.models import MultiStageModel
+        from efpt.models import MultiStageModel
 
         mu = np.array([1.0])
         nodes = np.array([0.0])
@@ -178,7 +178,7 @@ class TestMultiStageModel:
         assert model.is_update_vectorizable is True
 
     def test_boundary_intercepts_propagate(self):
-        from efficient_fpt.models import MultiStageModel
+        from efpt.models import MultiStageModel
 
         mu = np.array([1.0, 2.0])
         nodes = np.array([0.0, 1.0])
@@ -226,7 +226,7 @@ class TestADDModelMeanNLL:
         )
         nll1 = addm_model.mean_neg_log_likelihood(**kwargs)
         # Change eta and verify NLL changes
-        from efficient_fpt.models import aDDModel
+        from efpt.models import aDDModel
         model2 = aDDModel(eta=0.9, kappa=1.0, sigma=1.0, a=1.0, b=0.5, x0=0.0)
         nll2 = model2.mean_neg_log_likelihood(**kwargs)
         assert nll1 != nll2
@@ -240,7 +240,7 @@ class TestADDModelMeanNLL:
 class TestTADAMeanNLL:
     def test_returns_finite_scalar(self, addm_experiment):
         try:
-            from efficient_fpt.cython.batch import compute_tada_mean_nll
+            from efpt.cython.batch import compute_tada_mean_nll
         except ImportError:
             pytest.skip("Cython extension not available")
 
@@ -265,7 +265,7 @@ class TestTADAMeanNLL:
 
     def test_different_params_change_nll(self, addm_experiment):
         try:
-            from efficient_fpt.cython.batch import compute_tada_mean_nll
+            from efpt.cython.batch import compute_tada_mean_nll
         except ImportError:
             pytest.skip("Cython extension not available")
 

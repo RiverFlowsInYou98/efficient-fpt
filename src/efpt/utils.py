@@ -101,3 +101,20 @@ def resolve_quadrature_orders(order_mid, order_last, order=None):
             f"order_last={order_last}"
         )
     return order_mid, order_last
+
+
+def get_cpu_name():
+    """Return the CPU model name as a string.
+
+    Reads from ``/proc/cpuinfo`` on Linux, falls back to
+    :func:`platform.processor` on other systems.
+    """
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except FileNotFoundError:
+        pass
+    import platform
+    return platform.processor() or platform.machine() or "unknown"

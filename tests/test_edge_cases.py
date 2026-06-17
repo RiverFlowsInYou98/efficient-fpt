@@ -3,15 +3,15 @@ import warnings
 import numpy as np
 import pytest
 
-pytest.importorskip("efficient_fpt.cython.single_stage")
+pytest.importorskip("efpt.cython.single_stage")
 
-from efficient_fpt.models import SingleStageModel, aDDModel
-from efficient_fpt.single_stage import fptd_single, q_single
-from efficient_fpt.cython.single_stage import (
+from efpt.models import SingleStageModel, aDDModel
+from efpt.single_stage import fptd_single, q_single
+from efpt.cython.single_stage import (
     fptd_single as fptd_single_cy,
     q_single as q_single_cy,
 )
-from efficient_fpt.cython.batch import (
+from efpt.cython.batch import (
     compute_addm_loglikelihoods,
     compute_addm_mean_nll,
     compute_tada_mean_nll,
@@ -229,7 +229,7 @@ def test_jax_nll_matches_cython_warn_policy_and_warns_in_order():
     pytest.importorskip("jax")
     import jax.numpy as jnp
 
-    from efficient_fpt.jax.batch import compute_addm_nll
+    from efpt.jax.batch import compute_addm_nll
 
     mu1_data = np.array([0.2, 0.0, -0.1, 0.0], dtype=np.float64)
     mu2_data = np.zeros_like(mu1_data)
@@ -352,7 +352,7 @@ def test_jax_nll_returns_infinity_when_all_loglikelihoods_are_negative_infinity(
     pytest.importorskip("jax")
     import jax.numpy as jnp
 
-    from efficient_fpt.jax.batch import compute_addm_nll
+    from efpt.jax.batch import compute_addm_nll
 
     rt_data = jnp.full(3, 100.0, dtype=jnp.float64)
     choice_data = jnp.ones(3, dtype=jnp.int32)
@@ -421,7 +421,7 @@ def test_jax_one_shot_nll_warns_by_default_but_closure_stays_silent():
     pytest.importorskip("jax")
     import jax.numpy as jnp
 
-    from efficient_fpt.jax.batch import compute_addm_nll, make_addm_nll_function
+    from efpt.jax.batch import compute_addm_nll, make_addm_nll_function
 
     rt_data = np.array([10.0, 0.4, 10.0], dtype=np.float64)
     choice_data = np.ones(3, dtype=np.int32)

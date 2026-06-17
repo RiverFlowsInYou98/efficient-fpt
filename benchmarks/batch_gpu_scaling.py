@@ -125,7 +125,7 @@ def main():
                 compute[sweep_name] = sweep_value
 
             jax, jnp = import_jax(compute["precision"])
-            from efficient_fpt.jax.batch import make_addm_nll_function_batchscan
+            from efpt.jax.batch import make_addm_nll_function_batchscan
 
             dataset = make_batch_addm_dataset(
                 jnp,

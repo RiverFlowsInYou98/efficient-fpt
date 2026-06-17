@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from efficient_fpt.numpy.utils import positive_log as np_positive_log
+from efpt.numpy.utils import positive_log as np_positive_log
 
 
 def test_numpy_positive_log_contract():
@@ -18,7 +18,7 @@ def test_numpy_positive_log_contract():
 
 
 def test_cython_positive_log_contract():
-    cy_utils = pytest.importorskip("efficient_fpt.cython.utils")
+    cy_utils = pytest.importorskip("efpt.cython.utils")
     cy_positive_log = cy_utils.positive_log_wrapper
     assert math.isclose(cy_positive_log(2.0), math.log(2.0))
     assert math.isclose(cy_positive_log(1.0), 0.0)
@@ -31,7 +31,7 @@ def test_jax_positive_log_contract():
     jax = pytest.importorskip("jax")
     import jax.numpy as jnp
 
-    from efficient_fpt.jax.utils import (
+    from efpt.jax.utils import (
         get_jax_dtype,
         positive_log as jax_positive_log,
     )
