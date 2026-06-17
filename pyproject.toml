@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "efpt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Codes for efficient inference in first passage time models"
 authors = [
     { name = "Sicheng Liu", email = "sicheng_liu@brown.edu" }
